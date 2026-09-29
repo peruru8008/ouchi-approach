@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="theme-color" content="#16211a">
+<title>おうちアプローチ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <p class="brand">おうちアプローチ<small>自宅用アプローチ計測器</small></p>
+  <span class="pill" id="connPill"><i class="dot" id="connDot"></i><span id="connText">未接続</span></span>
+  <button class="linkbtn" id="switchRole" hidden>役割を変える</button>
+</header>
+
+<!-- ============ ROLE PICK ============ -->
+<main id="roleView" class="narrow stack">
+  <h1 class="title">この端末の役割を選んでください</h1>
+  <button class="rolecard" id="pickCam">
+    <b>iPhone:カメラ(計測)</b>
+    <span>三脚に固定して、ボールと足元を正面から映します</span>
+  </button>
+  <button class="rolecard" id="pickGreen">
+    <b>iPad:画面(弾道表示)</b>
+    <span>「打ってOK」の表示と、弾道・数値を映します</span>
+  </button>
+  <p class="note">カメラの映像はiPhoneの中だけで処理します。iPadへ送るのは計測した数値だけで、映像は保存も送信もしません。</p>
+</main>
+
+<!-- ============ CAMERA (iPhone) ============ -->
+<main id="camView" class="narrow stack" hidden>
+  <section class="panel stack" id="pairCam">
+    <h2>1. iPadとつなぐ</h2>
+    <p class="note">iPadの画面に出ている8文字の接続コードを入力してください。</p>
+    <div class="row">
+      <input id="codeIn" class="code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX" aria-label="接続コード">
+      <button class="btn primary" id="connectBtn">接続</button>
+    </div>
+  </section>
+
+  <section class="panel stack">
+    <h2>2. カメラを置いてボールを登録</h2>
+    <ol class="steps">
+      <li>三脚のiPhoneを横向きにし、ボールを挟んで自分と向かい合う位置(1〜1.5m)に置きます。</li>
+      <li>「カメラを開始」を押し、映像の中のボールを一度タップします。</li>
+      <li>次からは、同じあたりにボールを置くと自動で認識します。</li>
+    </ol>
+    <div class="row">
+      <button class="btn primary" id="camStart">カメラを開始</button>
+      <button class="btn" id="camStop" disabled>カメラを止める</button>
+    </div>
+  </section>
+
+  <div class="stage" id="stage">
+    <video id="vid" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div class="empty" id="stageEmpty">カメラは止まっています</div>
+  </div>
+  <div class="statebar" id="stateBar" data-state="off"><span id="stateText">カメラを開始してください</span><span class="num" id="fpsText"></span></div>
+
+  <section class="panel" id="camResult" hidden>
+    <div class="readout three">
+      <div><span>球速</span><b id="cSpeed">–</b></div>
+      <div><span>打ち出し角</span><b id="cAngle">–</b></div>
+      <div><span>スピン(推定)</span><b id="cSpin">–</b></div>
+    </div>
+    <p class="note" id="cMeta"></p>
+  </section>
+
+  <details class="panel">
+    <summary>計測の設定</summary>
+    <div class="stack mt">
+      <div class="field"><label for="sDiam">ボールの直径</label><output id="oDiam"></output><input id="sDiam" type="range" min="30" max="80" step="0.5" value="42.7"></div>
+      <div class="field"><label for="sRad">映像上のボールの大きさ補正</label><output id="oRad"></output><input id="sRad" type="range" min="0.6" max="1.6" step="0.02" value="1"></div>
+      <div class="field"><label for="sFactor">球速の換算係数(練習ボール → 本物)</label><output id="oFactor"></output><input id="sFactor" type="range" min="0.5" max="1.5" step="0.01" value="1"></div>
+      <div class="field"><label for="sAngOff">打ち出し角の補正</label><output id="oAngOff"></output><input id="sAngOff" type="range" min="-10" max="10" step="0.5" value="0"></div>
+      <div class="field"><label for="sSpin">スピン量</label><output id="oSpin"></output><input id="sSpin" type="range" min="0.4" max="1.6" step="0.05" value="1"></div>
+      <div class="field"><label for="sSens">検出の感度</label><output id="oSens"></output><input id="sSens" type="range" min="0.5" max="2" step="0.05" value="1"></div>
+      <button class="btn" id="retap">ボールを登録し直す</button>
+      <p class="note">明るい部屋ほど、ボールがぶれずに映って精度が上がります。左右の方向はこの版では計測せず、まっすぐ飛んだものとして扱います。</p>
+    </div>
+  </details>
+</main>
+
+<!-- ============ GREEN (iPad) ============ -->
+<main id="greenView" hidden>
+  <section class="stack minw0">
+    <div class="world" id="world">
+      <div class="hud">
+        <div class="chip"><span id="hHole">ホール 1</span><b id="hDist">–</b></div>
+        <div class="chip right"><span>グリーン</span><b class="small" id="hGreen">–</b></div>
+      </div>
+      <div class="ready" id="readyMark" data-state="off"><span id="readyText">カメラ待ち</span></div>
+      <div class="banner" id="banner" hidden></div>
+      <div class="viewbtns" role="group" aria-label="視点">
+        <button id="vFollow" aria-pressed="true">後方</button>
+        <button id="vTop" aria-pressed="false">真上</button>
+      </div>
+    </div>
+    <div class="readout six">
+      <div><span>球速</span><b id="gSpeed">–</b></div>
+      <div><span>打ち出し角</span><b id="gAngle">–</b></div>
+      <div><span>スピン</span><b id="gSpin">–</b></div>
+      <div><span>キャリー</span><b id="gCarry">–</b></div>
+      <div><span>合計</span><b id="gTotal">–</b></div>
+      <div><span>ピンまで</span><b id="gPin">–</b></div>
+    </div>
+  </section>
+
+  <aside class="stack minw0">
+    <section class="panel stack" id="pairGreen">
+      <span class="label">接続コード</span>
+      <b class="bigcode num" id="codeOut">––––-––––</b>
+      <p class="note" id="pairNote">iPhoneでこのコードを入力してください。</p>
+      <button class="btn" id="newCode">新しいコードにする</button>
+    </section>
+    <div class="seg" role="group" aria-label="遊び方">
+      <button id="mSolo" aria-pressed="true">1人で練習</button>
+      <button id="mDuo" aria-pressed="false">2人でニアピン対決</button>
+    </div>
+    <div class="players" id="players"></div>
+    <div class="row">
+      <button class="btn primary" id="nextHole">次のホール</button>
+      <button class="btn" id="resetGame">最初から</button>
+    </div>
+    <section class="panel">
+      <h2 id="logTitle">打球の記録</h2>
+      <div class="logwrap"><table class="log" id="logTable"><thead></thead><tbody></tbody></table></div>
+    </section>
+    <details class="panel">
+      <summary>カメラなしで試し打ち</summary>
+      <div class="stack mt">
+        <div class="field"><label for="tSpeed">球速</label><output id="otSpeed"></output><input id="tSpeed" type="range" min="4" max="30" step="0.5" value="14"></div>
+        <div class="field"><label for="tAngle">打ち出し角</label><output id="otAngle"></output><input id="tAngle" type="range" min="10" max="55" step="1" value="30"></div>
+        <div class="field"><label for="tDir">方向(+で右)</label><output id="otDir"></output><input id="tDir" type="range" min="-10" max="10" step="0.5" value="0"></div>
+        <div class="field"><label for="tSpin">スピン</label><output id="otSpin"></output><input id="tSpin" type="range" min="500" max="10000" step="100" value="4200"></div>
+        <button class="btn primary" id="testShot">この条件で打つ</button>
+      </div>
+    </details>
+  </aside>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="vendor/three.min.js"></script>
+<script src="vendor/peerjs.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
