@@ -12,47 +12,42 @@
 <body>
 
 <header class="top">
-  <p class="brand">おうちアプローチ<small>自宅用アプローチ計測器</small></p>
+  <p class="brand">おうちアプローチ<small>56度で寄せる、自宅のアプローチ場</small></p>
   <span class="pill" id="connPill"><i class="dot" id="connDot"></i><span id="connText">未接続</span></span>
   <button class="linkbtn" id="switchRole" hidden>役割を変える</button>
 </header>
 
 <!-- ============ ROLE PICK ============ -->
-<main id="roleView" class="narrow stack">
+<main id="roleView" class="narrow stack" hidden>
   <h1 class="title">この端末の役割を選んでください</h1>
-  <button class="rolecard" id="pickCam">
-    <b>iPhone:カメラ(計測)</b>
-    <span>三脚に固定して、ボールと足元を正面から映します</span>
-  </button>
   <button class="rolecard" id="pickGreen">
-    <b>iPad:画面(弾道表示)</b>
-    <span>「打ってOK」の表示と、弾道・数値を映します</span>
+    <b>iPad:画面</b>
+    <span>コースと弾道を映すメインの画面です。先にこちらを開きます</span>
+  </button>
+  <button class="rolecard" id="pickCam">
+    <b>iPhone:カメラ</b>
+    <span>iPadのQRコードを読み取ると、自動でこちらになります</span>
   </button>
   <p class="note">カメラの映像はiPhoneの中だけで処理します。iPadへ送るのは計測した数値だけで、映像は保存も送信もしません。</p>
 </main>
 
 <!-- ============ CAMERA (iPhone) ============ -->
 <main id="camView" class="narrow stack" hidden>
-  <section class="panel stack" id="pairCam">
-    <h2>1. iPadとつなぐ</h2>
-    <p class="note">iPadの画面に出ている8文字の接続コードを入力してください。</p>
-    <div class="row">
-      <input id="codeIn" class="code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX" aria-label="接続コード">
-      <button class="btn primary" id="connectBtn">接続</button>
-    </div>
+  <section class="panel stack" id="camPair">
+    <h2>iPadとつなぐ</h2>
+    <p>iPadに出ているQRコードを、iPhoneの<b>カメラアプリ</b>で読み取ってください。自動でつながります。</p>
+    <details>
+      <summary>コードを手で入力する</summary>
+      <div class="row mt">
+        <input id="codeIn" class="code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX" aria-label="接続コード">
+        <button class="btn primary" id="connectBtn">接続</button>
+      </div>
+    </details>
   </section>
 
-  <section class="panel stack">
-    <h2>2. カメラを置いてボールを登録</h2>
-    <ol class="steps">
-      <li>三脚のiPhoneを横向きにし、ボールを挟んで自分と向かい合う位置(1〜1.5m)に置きます。</li>
-      <li>「カメラを開始」を押し、映像の中のボールを一度タップします。</li>
-      <li>次からは、同じあたりにボールを置くと自動で認識します。</li>
-    </ol>
-    <div class="row">
-      <button class="btn primary" id="camStart">カメラを開始</button>
-      <button class="btn" id="camStop" disabled>カメラを止める</button>
-    </div>
+  <section class="statuscard" id="camStatus" data-state="off">
+    <b id="stateText">カメラを開始してください</b>
+    <span id="stateSub">三脚のiPhoneを、ボールを挟んで自分と向かい合う位置(1〜1.5m)に置きます</span>
   </section>
 
   <div class="stage" id="stage">
@@ -60,7 +55,12 @@
     <canvas id="overlay"></canvas>
     <div class="empty" id="stageEmpty">カメラは止まっています</div>
   </div>
-  <div class="statebar" id="stateBar" data-state="off"><span id="stateText">カメラを開始してください</span><span class="num" id="fpsText"></span></div>
+  <div class="row">
+    <button class="btn primary big" id="camStart">カメラを開始</button>
+    <button class="btn" id="camStop" hidden>カメラを止める</button>
+    <button class="btn" id="retap" hidden>ボールを登録し直す</button>
+  </div>
+  <p class="note" id="powerNote">しばらく触らないと画面を暗くして、発熱と電池の消費を抑えます。画面をタップすると戻ります。</p>
 
   <section class="panel" id="camResult" hidden>
     <div class="readout three">
@@ -68,7 +68,7 @@
       <div><span>打ち出し角</span><b id="cAngle">–</b></div>
       <div><span>スピン(推定)</span><b id="cSpin">–</b></div>
     </div>
-    <p class="note" id="cMeta"></p>
+    <p class="note mt" id="cMeta"></p>
   </section>
 
   <details class="panel">
@@ -80,25 +80,105 @@
       <div class="field"><label for="sAngOff">打ち出し角の補正</label><output id="oAngOff"></output><input id="sAngOff" type="range" min="-10" max="10" step="0.5" value="0"></div>
       <div class="field"><label for="sSpin">スピン量</label><output id="oSpin"></output><input id="sSpin" type="range" min="0.4" max="1.6" step="0.05" value="1"></div>
       <div class="field"><label for="sSens">検出の感度</label><output id="oSens"></output><input id="sSens" type="range" min="0.5" max="2" step="0.05" value="1"></div>
-      <button class="btn" id="retap">ボールを登録し直す</button>
-      <p class="note">明るい部屋ほど、ボールがぶれずに映って精度が上がります。左右の方向はこの版では計測せず、まっすぐ飛んだものとして扱います。</p>
+      <p class="note">明るい部屋ほどボールがぶれずに映り、精度が上がります。左右の方向はこの版では計測せず、iPadで決めた狙いの方向へ飛んだものとして扱います。</p>
     </div>
   </details>
 </main>
+<div class="blackout" id="blackout" hidden>
+  <b id="boText">打ってOK</b>
+  <span>省電力中・タップで戻ります</span>
+</div>
 
-<!-- ============ GREEN (iPad) ============ -->
-<main id="greenView" hidden>
+<!-- ============ iPad: HOME ============ -->
+<main id="homeView" class="home" hidden>
+  <section class="panel stack connect" id="connectCard">
+    <span class="label">iPhoneとつなぐ</span>
+    <canvas id="qr" width="232" height="232" aria-label="接続用QRコード"></canvas>
+    <p class="note" id="pairNote">iPhoneのカメラアプリでこのQRコードを読み取ってください。</p>
+    <p class="codeline">コード <b class="num" id="codeOut">––––-––––</b></p>
+    <button class="linkbtn left" id="newCode">新しいコードにする</button>
+  </section>
+
+  <section class="stack minw0">
+    <div class="panel stack">
+      <span class="label">上限ヤード(これ以上飛んだら1打罰)</span>
+      <div class="seg big" role="group" aria-label="上限ヤード" id="limitSeg">
+        <button data-v="25">25ヤード</button><button data-v="35">35ヤード</button><button data-v="45">45ヤード</button>
+      </div>
+      <p class="note" id="limitNote"></p>
+    </div>
+    <div class="modes">
+      <button class="modecard" id="goFree">
+        <span class="tag">1人</span>
+        <b>フリー練習</b>
+        <span>全面グリーンの練習場。5〜45ヤードと60ヤードからピンの距離を選んで、何球でも寄せる練習ができます。</span>
+      </button>
+      <button class="modecard" id="goCourse">
+        <span class="tag">1〜2人</span>
+        <b>コース</b>
+        <span>6つのホールから1つ選んで、56度だけで回ります。ピンから2m以内に止めたら上がり。</span>
+      </button>
+    </div>
+    <div class="readyline" id="homeReady" data-state="off"><i></i><span id="homeReadyText">iPhoneのカメラ待ち</span></div>
+  </section>
+</main>
+
+<!-- ============ iPad: FREE SETUP ============ -->
+<main id="freeView" class="narrow stack" hidden>
+  <button class="linkbtn left" data-back>← ホームへ</button>
+  <h1 class="title">ピンまでの距離を選んでください</h1>
+  <div class="distgrid" id="distGrid"></div>
+  <p class="note">選んだ距離にカップを切ります。練習場は全面グリーンです。</p>
+</main>
+
+<!-- ============ iPad: COURSE SETUP ============ -->
+<main id="courseView" class="stack" hidden>
+  <button class="linkbtn left" data-back>← ホームへ</button>
+  <div class="setuprow">
+    <div class="panel stack">
+      <span class="label">人数</span>
+      <div class="seg big" role="group" aria-label="人数" id="playerSeg"><button data-v="1">1人</button><button data-v="2">2人で対戦</button></div>
+    </div>
+    <div class="panel stack names">
+      <span class="label">名前</span>
+      <div class="row">
+        <label class="namefield c1"><i></i><input id="name0" maxlength="10" aria-label="プレイヤー1の名前"></label>
+        <label class="namefield c2" id="name1wrap"><i></i><input id="name1" maxlength="10" aria-label="プレイヤー2の名前"></label>
+      </div>
+    </div>
+  </div>
+  <h1 class="title">コースを選んでください</h1>
+  <div class="coursegrid" id="courseGrid"></div>
+</main>
+
+<!-- ============ iPad: PLAY ============ -->
+<main id="playView" hidden>
   <section class="stack minw0">
     <div class="world" id="world">
       <div class="hud">
-        <div class="chip"><span id="hHole">ホール 1</span><b id="hDist">–</b></div>
-        <div class="chip right"><span>グリーン</span><b class="small" id="hGreen">–</b></div>
+        <div class="chip" id="hudLeft"><span id="hTitle">–</span><b id="hMain">–</b></div>
+        <div class="chip right" id="hudRight"><span id="hTurn">–</span><b id="hSub">–</b></div>
       </div>
       <div class="ready" id="readyMark" data-state="off"><span id="readyText">カメラ待ち</span></div>
       <div class="banner" id="banner" hidden></div>
+      <div class="aimbar" id="aimBar" role="group" aria-label="狙いの方向">
+        <button id="aimL" aria-label="狙いを左へ">◀</button>
+        <button id="aimPin">ピン</button>
+        <button id="aimRoute" hidden>ルート</button>
+        <button id="aimR" aria-label="狙いを右へ">▶</button>
+      </div>
       <div class="viewbtns" role="group" aria-label="視点">
         <button id="vFollow" aria-pressed="true">後方</button>
         <button id="vTop" aria-pressed="false">真上</button>
+      </div>
+      <div class="result" id="resultBox" hidden>
+        <h2 id="resTitle">ホールアウト</h2>
+        <table class="restable" id="resTable"></table>
+        <div class="row">
+          <button class="btn primary" id="resAgain">もう一度</button>
+          <button class="btn" id="resCourse">コースを選ぶ</button>
+          <button class="btn" id="resHome">ホームへ</button>
+        </div>
       </div>
     </div>
     <div class="readout six">
@@ -106,41 +186,38 @@
       <div><span>打ち出し角</span><b id="gAngle">–</b></div>
       <div><span>スピン</span><b id="gSpin">–</b></div>
       <div><span>キャリー</span><b id="gCarry">–</b></div>
-      <div><span>合計</span><b id="gTotal">–</b></div>
+      <div><span>総距離</span><b id="gTotal">–</b></div>
       <div><span>ピンまで</span><b id="gPin">–</b></div>
     </div>
   </section>
 
   <aside class="stack minw0">
-    <section class="panel stack" id="pairGreen">
-      <span class="label">接続コード</span>
-      <b class="bigcode num" id="codeOut">––––-––––</b>
-      <p class="note" id="pairNote">iPhoneでこのコードを入力してください。</p>
-      <button class="btn" id="newCode">新しいコードにする</button>
+    <section class="panel stack" id="sideFree">
+      <span class="label">練習の記録</span>
+      <div class="stats">
+        <div><span>球数</span><b id="fsN">0</b></div>
+        <div><span>2m以内</span><b id="fsOk">–</b></div>
+        <div><span>平均ピンまで</span><b id="fsAvg">–</b></div>
+        <div><span>ベスト</span><b id="fsBest">–</b></div>
+      </div>
+      <div class="logwrap"><table class="log" id="freeLog"></table></div>
+      <button class="btn" id="changeDist">距離を変える</button>
     </section>
-    <div class="seg" role="group" aria-label="遊び方">
-      <button id="mSolo" aria-pressed="true">1人で練習</button>
-      <button id="mDuo" aria-pressed="false">2人でニアピン対決</button>
-    </div>
-    <div class="players" id="players"></div>
-    <div class="row">
-      <button class="btn primary" id="nextHole">次のホール</button>
-      <button class="btn" id="resetGame">最初から</button>
-    </div>
-    <section class="panel">
-      <h2 id="logTitle">打球の記録</h2>
-      <div class="logwrap"><table class="log" id="logTable"><thead></thead><tbody></tbody></table></div>
+    <section class="panel stack" id="sideCourse">
+      <span class="label" id="scTitle">スコア</span>
+      <div class="players" id="scPlayers"></div>
+      <div class="logwrap"><table class="log" id="courseLog"></table></div>
     </section>
     <details class="panel">
       <summary>カメラなしで試し打ち</summary>
       <div class="stack mt">
-        <div class="field"><label for="tSpeed">球速</label><output id="otSpeed"></output><input id="tSpeed" type="range" min="4" max="30" step="0.5" value="14"></div>
-        <div class="field"><label for="tAngle">打ち出し角</label><output id="otAngle"></output><input id="tAngle" type="range" min="10" max="55" step="1" value="30"></div>
-        <div class="field"><label for="tDir">方向(+で右)</label><output id="otDir"></output><input id="tDir" type="range" min="-10" max="10" step="0.5" value="0"></div>
-        <div class="field"><label for="tSpin">スピン</label><output id="otSpin"></output><input id="tSpin" type="range" min="500" max="10000" step="100" value="4200"></div>
+        <div class="field"><label for="tSpeed">球速</label><output id="otSpeed"></output><input id="tSpeed" type="range" min="4" max="30" step="0.5" value="13"></div>
+        <div class="field"><label for="tAngle">打ち出し角</label><output id="otAngle"></output><input id="tAngle" type="range" min="10" max="55" step="1" value="32"></div>
+        <div class="field"><label for="tSpin">スピン</label><output id="otSpin"></output><input id="tSpin" type="range" min="500" max="10000" step="100" value="4000"></div>
         <button class="btn primary" id="testShot">この条件で打つ</button>
       </div>
     </details>
+    <button class="btn" id="quitPlay">やめてホームへ</button>
   </aside>
 </main>
 
@@ -148,6 +225,7 @@
 
 <script src="vendor/three.min.js"></script>
 <script src="vendor/peerjs.min.js"></script>
+<script src="vendor/qrcode.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
