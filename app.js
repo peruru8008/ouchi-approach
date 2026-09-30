@@ -173,6 +173,150 @@ const COURSES = (() => {
 })();
 
 
+// ===== ボール認識:緑のマットの上に乗っている「丸くて緑でない物」を探す =====
+// 色・穴・黒い点・写る大きさに左右されないよう、ボールそのものの色ではなく
+// 「下側がマットの緑に接している円形の輪郭」を手がかりにする。
+const DETECT = (() => {
+  let cap = 0, G = null, bottom = null, tmp = null;
+  function ensure(n, w) { if (cap < n) { cap = n; G = new Uint8Array(n); tmp = new Uint8Array(n); } if (!bottom || bottom.length < w) bottom = new Int32Array(w); }
+
+  // 緑(マット)かどうか。暗い影の部分も、緑寄りならマットとみなす
+  function isGreenPx(r, g, b) {
+    const mx = r > b ? r : b;
+    if (g < 48) return g >= r && g >= b - 2 && g > 10;
+    return g > r * 1.12 && g > b * 1.05 && g - mx > 10;
+  }
+  function greenMask(d, W, H) {
+    const N = W * H;
+    for (let i = 0, p = 0; i < N; i++, p += 4) tmp[i] = isGreenPx(d[p], d[p + 1], d[p + 2]) ? 1 : 0;
+    // 3x3の多数決でマットのきらめき(白い点)を消す
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let s = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue; const o = yy * W; for (let dx = -1; dx <= 1; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; s += tmp[o + xx]; n++; } }
+      G[y * W + x] = s * 2 > n ? 1 : 0;
+    }
+  }
+  // 各列について、下から見て「マットの緑が続いたあと最初に緑でなくなる行」= マットに乗っている物の下端
+  function bottomProfile(W, H) {
+    for (let x = 0; x < W; x++) {
+      let y = H - 1, run = 0, found = -1;
+      // マットに入るまで(緑が4行続くまで)上がる
+      for (; y >= 0; y--) { if (G[y * W + x]) { if (++run >= 4) break; } else run = 0; }
+      if (y < 0) { bottom[x] = -2; continue; }        // この列にマットがない
+      // マットのきらめきで止まらないよう、緑でない行が4行以上続いたら物の下端とする
+      for (; y >= 0; y--) { if (!G[y * W + x]) { let k = 1; while (k < 4 && y - k >= 0 && !G[(y - k) * W + x]) k++; if (k >= 4 || y - k < 0) { found = y; break; } } }
+      bottom[x] = found;                               // -1 ならマットが画面上端まで続いている
+    }
+  }
+  // 最小二乗で円を当てる(Kasa法)
+  function fitCircle(px, py) {
+    const n = px.length; if (n < 5) return null;
+    let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += px[i]; my += py[i]; } mx /= n; my /= n;
+    let suu = 0, svv = 0, suv = 0, suuu = 0, svvv = 0, suvv = 0, svuu = 0;
+    for (let i = 0; i < n; i++) { const u = px[i] - mx, v = py[i] - my; suu += u * u; svv += v * v; suv += u * v; suuu += u * u * u; svvv += v * v * v; suvv += u * v * v; svuu += v * u * u; }
+    const det = suu * svv - suv * suv; if (Math.abs(det) < 1e-9) return null;
+    const a = 0.5 * (suuu + suvv), b = 0.5 * (svvv + svuu);
+    const uc = (a * svv - b * suv) / det, vc = (b * suu - a * suv) / det;
+    const r = Math.sqrt(uc * uc + vc * vc + (suu + svv) / n);
+    return { x: uc + mx, y: vc + my, r };
+  }
+  function residual(c, px, py) { let s = 0; for (let i = 0; i < px.length; i++) { const e = Math.hypot(px[i] - c.x, py[i] - c.y) - c.r; s += e * e; } return Math.sqrt(s / px.length); }
+
+  function detect(d, W, H) {
+    ensure(W * H, W); greenMask(d, W, H); bottomProfile(W, H);
+    // 1列だけ飛び出た値(穴やきらめき)を、左右5列の中央値でならす
+    const raw = bottom.slice(0, W);
+    for (let x = 0; x < W; x++) { const v = []; for (let k = x - 2; k <= x + 2; k++) if (k >= 0 && k < W && raw[k] >= -1) v.push(raw[k]); if (v.length >= 3 && raw[x] >= -1) { v.sort((a, b) => a - b); bottom[x] = v[v.length >> 1]; } }
+    // マットの上端(物が乗っていない所の下端)を、列ごとの値のなめらかな基準線として求める
+    const base = new Float32Array(W), win = Math.max(8, Math.round(W * 0.12));
+    for (let x = 0; x < W; x++) {
+      const vals = [];
+      for (let k = Math.max(0, x - win); k <= Math.min(W - 1, x + win); k++) if (bottom[k] >= -1) vals.push(bottom[k]);
+      if (!vals.length) { base[x] = NaN; continue; }
+      vals.sort((a, b) => a - b); base[x] = vals[Math.floor(vals.length * 0.25)];
+    }
+    // 基準線より下に垂れ下がっている区間 = マットの上に乗っている物
+    const minDip = 2, out = [];
+    let x = 0;
+    while (x < W) {
+      if (!(bottom[x] >= 0 && bottom[x] - base[x] >= minDip)) { x++; continue; }
+      let x2 = x; while (x2 + 1 < W && bottom[x2 + 1] >= 0 && bottom[x2 + 1] - base[x2 + 1] >= minDip) x2++;
+      const w = x2 - x + 1;
+      if (w >= 5 && x > 0 && x2 < W - 1) {
+        let px = [], py = [];
+        for (let k = x; k <= x2; k++) { px.push(k); py.push(bottom[k]); }
+        let c = fitCircle(px, py);
+        // 外れ値(穴や影)を除いてもう一度
+        if (c) { const e = px.map((q, i) => Math.abs(Math.hypot(q - c.x, py[i] - c.y) - c.r)); const lim = [...e].sort((a, b) => a - b)[Math.floor(e.length * 0.8)] + 0.5; const qx = [], qy = []; px.forEach((q, i) => { if (e[i] <= lim) { qx.push(q); qy.push(py[i]); } }); if (qx.length >= 5) { const c2 = fitCircle(qx, qy); if (c2) { c = c2; px = qx; py = qy; } } }
+        if (c) {
+          // 区間の両脇にあるマットの縁(物が乗っていない所)の高さ
+          const side = []; for (let k = 1; k <= 6; k++) { if (x - k >= 0 && bottom[x - k] >= -1) side.push(bottom[x - k]); if (x2 + k < W && bottom[x2 + k] >= -1) side.push(bottom[x2 + k]); }
+          const edge = side.length ? side.reduce((a, b) => a + b, 0) / side.length : -1;
+          c.depth = (c.y - edge) / c.r;
+          const cand = score(d, W, H, c, x, x2, px, py);
+          if (cand) out.push(cand);
+        }
+      }
+      x = x2 + 1;
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out[0] || null;
+  }
+
+  function score(d, W, H, c, xL, xR, px, py) {
+    const r = c.r;
+    if (!(r >= 3 && r <= Math.min(W, H) * 0.3)) return null;
+    // ボールはマットの奥の縁より手前に乗っている(縁のくぼみや角を除く)
+    if (c.depth < -0.3) return null;
+    if (c.x < xL - r * 0.2 || c.x > xR + r * 0.2) return null;
+    const chord = xR - xL + 1; if (chord < r * 1.1 || chord > r * 2.4) return null;
+    const res = residual(c, px, py); if (res > Math.max(0.9, r * 0.1)) return null;
+    // 区間の最下点は円の下端に近いこと(下半分の弧であること)
+    const lowY = Math.max(...py); if (Math.abs(lowY - (c.y + r)) > Math.max(1.5, r * 0.15)) return null;
+    // 円の内側はほぼ緑でない、円のすぐ下はマットの緑
+    let inN = 0, inT = 0, ringG = 0, ringT = 0;
+    const r2 = r * 0.82, x0 = Math.max(0, Math.floor(c.x - r)), x1 = Math.min(W - 1, Math.ceil(c.x + r));
+    for (let y = Math.max(0, Math.floor(c.y - r)); y <= Math.min(H - 1, Math.ceil(c.y + r)); y++) for (let xx = x0; xx <= x1; xx++) { if (Math.hypot(xx - c.x, y - c.y) > r2) continue; inT++; if (!G[y * W + xx]) inN++; }
+    for (let a = 25; a <= 155; a += 5) { const t = a * Math.PI / 180; for (const k of [1.18, 1.3, 1.45]) { const xx = Math.round(c.x + Math.cos(t) * r * k), y = Math.round(c.y + Math.sin(t) * r * k); if (xx < 0 || y < 0 || xx >= W || y >= H) continue; ringT++; if (G[y * W + xx]) ringG++; } }
+    if (!inT || !ringT) return null;
+    const fin = inN / inT, fring = ringG / ringT;
+    if (fin < 0.6 || fring < 0.7) return null;
+    // ボールらしい色(明るい白、または鮮やかな色)がある程度含まれること。クラブや指を除く
+    let like = 0, tot = 0;
+    for (let y = Math.max(0, Math.floor(c.y - r)); y <= Math.min(H - 1, Math.ceil(c.y + r)); y += 1) for (let xx = x0; xx <= x1; xx += 1) {
+      if (Math.hypot(xx - c.x, y - c.y) > r * 0.8 || G[y * W + xx]) continue;
+      const p = (y * W + xx) * 4, R = d[p], Gg = d[p + 1], B = d[p + 2];
+      const mx = Math.max(R, Gg, B), mn = Math.min(R, Gg, B); tot++;
+      if ((mn > 165 && mx - mn < 70) || mx - mn > 95) like++;
+    }
+    const flike = tot ? like / tot : 0;
+    if (flike < 0.2) return null;
+    const s = fin + fring + Math.min(1, chord / (r * 1.8)) - res / r;
+    return { x: c.x, y: c.y, r, score: s + flike * 0.5, fin, fring, flike, depth: c.depth };
+  }
+
+  // ボールの2色(例:白とオレンジ)を覚える。打ったあとの追跡に使う
+  function palette(d, W, H, b) {
+    const pts = [];
+    for (let y = Math.max(0, Math.floor(b.y - b.r)); y <= Math.min(H - 1, Math.ceil(b.y + b.r)); y++) for (let x = Math.max(0, Math.floor(b.x - b.r)); x <= Math.min(W - 1, Math.ceil(b.x + b.r)); x++) {
+      if (Math.hypot(x - b.x, y - b.y) > b.r * 0.8 || G[y * W + x]) continue; const p = (y * W + x) * 4; pts.push([d[p], d[p + 1], d[p + 2]]);
+    }
+    if (pts.length < 4) return null;
+    const lum = (q) => q[0] + q[1] + q[2];
+    pts.sort((a, c) => lum(a) - lum(c));
+    let c1 = pts[Math.floor(pts.length * 0.25)].slice(), c2 = pts[Math.floor(pts.length * 0.8)].slice();
+    for (let it = 0; it < 6; it++) {
+      const s1 = [0, 0, 0, 0], s2 = [0, 0, 0, 0];
+      for (const q of pts) { const d1 = Math.abs(q[0] - c1[0]) + Math.abs(q[1] - c1[1]) + Math.abs(q[2] - c1[2]), d2 = Math.abs(q[0] - c2[0]) + Math.abs(q[1] - c2[1]) + Math.abs(q[2] - c2[2]); const s = d1 < d2 ? s1 : s2; s[0] += q[0]; s[1] += q[1]; s[2] += q[2]; s[3]++; }
+      if (s1[3]) c1 = [s1[0] / s1[3], s1[1] / s1[3], s1[2] / s1[3]]; if (s2[3]) c2 = [s2[0] / s2[3], s2[1] / s2[3], s2[2] / s2[3]];
+    }
+    return [c1, c2];
+  }
+  function isGreenAt(i) { return G[i] === 1; }
+  return { detect, palette, isGreenPx, isGreenAt };
+})();
+
+
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -340,21 +484,21 @@ const Net = (() => {
 })();
 
 /* ======================================================================
-   CAMERA (iPhone): automatic ball recognition + launch measurement
+   CAMERA (iPhone): ball recognition (DETECT) + launch measurement
    ====================================================================== */
 const Cam = (() => {
   const vid = $('vid'), ov = $('overlay'), octx = ov.getContext('2d');
   const proc = document.createElement('canvas'); const pctx = proc.getContext('2d', { willReadFrequently: true });
-  const PW = 480; let PH = 270;
+  const LONG = 640;                      // 解析する画像の長辺(px)
+  let PW = 640, PH = 360, srcW = 0, srcH = 0;
   let stream = null, wake = null, running = false, frameN = 0;
-  let state = 'off', lastSent = '', prev = null, info = { next: '', lie: '' };
-  let ball = null;           // 認識したボール {x, y, r, color}
-  let cand = null, stable = 0, readyFrac = 0, low = 0, needTap = false, candBox = null;
-  let pts = [], trackStart = 0, lost = 0, cooldownUntil = 0, lastTrack = null;
+  let state = 'off', lastSent = '', prev = null, info = { next: '', lie: '' }, issue = null;
+  let ball = null, pal = null;           // 認識したボール {x,y,r} と、その2色
+  let cand = null, stable = 0, readyFrac = 0, low = 0, needTap = false;
+  let pts = [], trackStart = 0, lost = 0, cooldownUntil = 0, lastTrack = null, lastPresentT = 0;
   let lastTouch = Date.now(), lastActive = Date.now(), dark = false;
-  const learned = store.get('ballColor', null); // 前回のボールの色(優先して探す)
-  let learnedColor = learned;
-  const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000;
+  const ftimes = [];
+  const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000, STABLE = 6;
   const S = { diam: store.get('diam', 42.7), rad: 1, factor: store.get('factor', 1), angOff: store.get('angOff', 0), spin: store.get('spin', 1), sens: store.get('sens', 1) };
   [['sDiam','oDiam','diam',v=>v.toFixed(1)+' mm'],['sRad','oRad','rad',v=>'×'+v.toFixed(2)],['sFactor','oFactor','factor',v=>'×'+v.toFixed(2)],
    ['sAngOff','oAngOff','angOff',v=>(v>0?'+':'')+v.toFixed(1)+'°'],['sSpin','oSpin','spin',v=>'×'+v.toFixed(2)],['sSens','oSens','sens',v=>'×'+v.toFixed(2)]]
@@ -362,27 +506,34 @@ const Cam = (() => {
 
   const TEXT = {
     off: ['カメラを開始してください', '三脚のiPhoneを横向きにして、ボールを挟んで自分と向かい合う位置(約1m)に置きます'],
-    search: ['ボールを置いてください', 'ボールが止まると自動で認識します'],
+    search: ['ボールを置いてください', 'マットの上に置いたボールを自動で見つけます'],
     tap: ['ボールをタップして登録', '映像の中の、止まっているボールを1回タップしてください'],
     ready: ['打ってOK', ''],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
     error: ['もう一度どうぞ', '']
   };
-  function infoLine() { if (!info.next && !info.lie) return ''; return [info.next ? `次は ${info.next}` : '', info.lie ? `${info.lie}から打つ` : ''].filter(Boolean).join('・'); }
+  // 計測できない置き方のときの案内。iPadには記号(portrait/near/far)だけを送る
+  const ISSUE = {
+    portrait: ['iPhoneを横向きにしてください', '縦向きだと、打ったボールがすぐ画面の外に出てしまい、球速を測れません'],
+    near: ['カメラが近すぎます', 'ボールから1m前後離してください。今の距離だと、打った瞬間にボールが画面の外に出てしまいます'],
+    far: ['カメラが遠すぎます', 'ボールが小さすぎて正確に測れません。もう少し近づけてください']
+  };
+  function infoLine() { if (!info.next && !info.lie) return ''; return [info.next ? `次は ${info.next}` : '', info.lie ? `${info.lie}から打つ` : ''].filter(Boolean).join('、'); }
   function setState(s, sub) {
     state = s;
-    const t = TEXT[s] || ['', ''];
-    $('camStatus').dataset.state = s;
+    const t = s === 'adjust' ? ISSUE[issue] : (TEXT[s] || ['', '']);
+    $('camStatus').dataset.state = s === 'adjust' ? 'error' : s;
     $('stateText').textContent = t[0];
     $('stateSub').textContent = sub || ((s === 'ready' || s === 'search') && infoLine()) || t[1];
     $('boText').textContent = t[0];
     pushStatus();
   }
   function pushStatus(force) {
-    const st = state === 'ready' ? 'ready' : state === 'track' ? 'track' : state === 'off' ? 'off' : 'wait';
-    if (!force && st === lastSent) return;
-    lastSent = st; Net.send({ type: 'status', state: st });
+    const st = state === 'ready' ? 'ready' : state === 'track' ? 'track' : state === 'off' ? 'off' : state === 'adjust' ? 'adjust' : 'wait';
+    const key = st + (st === 'adjust' ? issue : '');
+    if (!force && key === lastSent) return;
+    lastSent = key; Net.send(st === 'adjust' ? { type: 'status', state: st, issue } : { type: 'status', state: st });
   }
   function onInfo(m) {
     info.next = typeof m.next === 'string' ? m.next.slice(0, 16) : '';
@@ -390,6 +541,12 @@ const Cam = (() => {
     if (state === 'ready' || state === 'search') setState(state);
   }
   function setButtons() { $('camStart').hidden = running; $('camStop').hidden = !running; }
+  function setupProc() {
+    srcW = vid.videoWidth; srcH = vid.videoHeight;
+    const s = LONG / Math.max(srcW, srcH); PW = Math.round(srcW * s); PH = Math.round(srcH * s);
+    proc.width = PW; proc.height = PH; prev = null;
+    $('stage').style.aspectRatio = srcW + ' / ' + srcH;
+  }
 
   async function start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('このブラウザではカメラを使えません(Safariで開いてください)'); return; }
@@ -399,11 +556,10 @@ const Cam = (() => {
     vid.srcObject = stream;
     try { await vid.play(); } catch (e) {}
     await new Promise(r => { if (vid.videoWidth) r(); else vid.onloadedmetadata = () => r(); });
-    PH = Math.round(PW * vid.videoHeight / vid.videoWidth); proc.width = PW; proc.height = PH;
-    $('stage').style.aspectRatio = vid.videoWidth + ' / ' + vid.videoHeight;
+    setupProc();
     $('stageEmpty').hidden = true;
     try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) { wake = null; }
-    running = true; prev = null; lastTouch = lastActive = Date.now(); setButtons();
+    running = true; lastTouch = lastActive = Date.now(); setButtons();
     toSearch();
     loop();
   }
@@ -428,59 +584,23 @@ const Cam = (() => {
     if (!running || role !== 'camera') return;
     const now = Date.now();
     if (now - lastActive > IDLE_STOP) { stop('10分間打たなかったので、カメラを休止しました。「カメラを開始」で再開します'); return; }
-    if (!dark && !needTap && now - lastTouch > IDLE_DARK) setDark(true);
-    if (state === 'ready') pushStatus(true);
+    if (!dark && !needTap && state !== 'adjust' && now - lastTouch > IDLE_DARK) setDark(true);
+    if (state === 'ready' || state === 'adjust') pushStatus(true);
   }, 1000);
 
   function grab() { pctx.drawImage(vid, 0, 0, PW, PH); return pctx.getImageData(0, 0, PW, PH).data; }
-  const cdist = (d, i, c) => Math.abs(d[i] - c[0]) + Math.abs(d[i + 1] - c[1]) + Math.abs(d[i + 2] - c[2]);
+  const L1 = (d, i, c) => Math.abs(d[i] - c[0]) + Math.abs(d[i + 1] - c[1]) + Math.abs(d[i + 2] - c[2]);
+  const palDist = (d, i) => pal ? Math.min(L1(d, i, pal[0]), L1(d, i, pal[1])) : 999;
+  const fps = () => ftimes.length > 10 ? (ftimes.length - 1) / (ftimes[ftimes.length - 1] - ftimes[0]) : 0;
 
-  /* ---- 自動認識:明るい・鮮やかな色の、丸い、止まっている塊を探す(内側の黒い点は加点) ---- */
-  const cls = new Uint8Array(480 * 480), vis = new Uint8Array(480 * 480), qbuf = new Int32Array(480 * 480);
-  function findAuto(d) {
-    const N = PW * PH;
-    for (let i = 0, p = 0; i < N; i++, p += 4) {
-      const r = d[p], g = d[p + 1], b = d[p + 2];
-      const mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
-      cls[i] = (mx > 135 && (mx - mn > 60 || mn > 180)) ? 1 : (mx < 80 ? 2 : 0);
-    }
-    vis.fill(0, 0, N);
-    const minA = 12, maxA = N * 0.015; let best = null;
-    const y0 = Math.floor(PH * 0.12);
-    for (let s = y0 * PW; s < N; s++) {
-      if (cls[s] !== 1 || vis[s]) continue;
-      let head = 0, tail = 0; qbuf[tail++] = s; vis[s] = 1;
-      let n = 0, sx = 0, sy = 0, sr = 0, sg = 0, sb = 0, mnx = PW, mxx = 0, mny = PH, mxy = 0, big = false;
-      while (head < tail) {
-        const k = qbuf[head++]; const x = k % PW, y = (k / PW) | 0; n++; sx += x; sy += y;
-        const p = k * 4; sr += d[p]; sg += d[p + 1]; sb += d[p + 2];
-        if (x < mnx) mnx = x; if (x > mxx) mxx = x; if (y < mny) mny = y; if (y > mxy) mxy = y;
-        if (n > maxA) { big = true; }
-        if (x > 0 && cls[k - 1] === 1 && !vis[k - 1]) { vis[k - 1] = 1; qbuf[tail++] = k - 1; }
-        if (x < PW - 1 && cls[k + 1] === 1 && !vis[k + 1]) { vis[k + 1] = 1; qbuf[tail++] = k + 1; }
-        if (y > 0 && cls[k - PW] === 1 && !vis[k - PW]) { vis[k - PW] = 1; qbuf[tail++] = k - PW; }
-        if (y < PH - 1 && cls[k + PW] === 1 && !vis[k + PW]) { vis[k + PW] = 1; qbuf[tail++] = k + PW; }
-      }
-      if (big || n < minA) continue;
-      const w = mxx - mnx + 1, h = mxy - mny + 1;
-      if (w / h > 1.5 || h / w > 1.5 || mnx === 0 || mny === 0 || mxx === PW - 1 || mxy === PH - 1) continue;
-      const fill = n / (w * h); if (fill < 0.42 || fill > 0.95) continue;
-      const cx = sx / n, cy = sy / n, r = (w + h) / 4;
-      // 内側の黒い点
-      let dk = 0, tot = 0;
-      for (let yy = Math.floor(cy - r); yy <= cy + r; yy++) for (let xx = Math.floor(cx - r); xx <= cx + r; xx++) {
-        if (xx < 0 || yy < 0 || xx >= PW || yy >= PH || Math.hypot(xx - cx, yy - cy) > r * 0.85) continue;
-        tot++; if (cls[yy * PW + xx] === 2) dk++;
-      }
-      const dots = tot ? dk / tot : 0;
-      const color = [sr / n, sg / n, sb / n];
-      let score = 1.2 - Math.abs(fill - 0.72) * 2 + (dots > 0.01 && dots < 0.35 ? 0.8 : 0) + (cy / PH) * 0.3;
-      if (learnedColor) score += Math.max(0, 0.8 - cdist([...color, 0], 0, learnedColor) / 120);
-      if (!best || score > best.score) best = { x: cx, y: cy, r: Math.max(2, Math.sqrt(n / Math.PI) * 1.04), color, score, box: [mnx, mny, w, h] };
-    }
-    return best;
+  function toSearch() { ball = null; cand = null; stable = 0; low = 0; pts = []; lost = 0; issue = null; if (running) setState(needTap ? 'tap' : 'search'); }
+  function setupIssue(b) {
+    if (PH > PW) return 'portrait';
+    const dia = 2 * b.r / PW;
+    if (dia > 0.12) return 'near';
+    if (dia < 0.018) return 'far';
+    return null;
   }
-  function toSearch() { ball = null; cand = null; stable = 0; low = 0; pts = []; lost = 0; if (running) setState(needTap ? 'tap' : 'search'); }
 
   // 予備:タップで登録
   function measureAt(d, px, py) {
@@ -489,17 +609,17 @@ const Cam = (() => {
     for (let y = py - 1; y <= py + 1; y++) for (let x = px - 1; x <= px + 1; x++) { if (x < 0 || y < 0 || x >= PW || y >= PH) continue; const i = (y * PW + x) * 4; c[0] += d[i]; c[1] += d[i + 1]; c[2] += d[i + 2]; n++; }
     c = c.map(v => v / Math.max(1, n));
     const seen = new Uint8Array(PW * PH), q = [py * PW + px]; seen[q[0]] = 1; let area = 0, sx = 0, sy = 0;
-    while (q.length && area < 6000) {
+    while (q.length && area < 8000) {
       const k = q.pop(); const x = k % PW, y = (k / PW) | 0; area++; sx += x; sy += y;
       for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-        const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= PW || ny >= PH || Math.hypot(nx - px, ny - py) > 50) continue;
-        const kk = ny * PW + nx; if (seen[kk]) continue; seen[kk] = 1; if (cdist(d, kk * 4, c) < 70) q.push(kk);
+        const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= PW || ny >= PH || Math.hypot(nx - px, ny - py) > 60) continue;
+        const kk = ny * PW + nx; if (seen[kk]) continue; seen[kk] = 1; const p = kk * 4; if (!DETECT.isGreenPx(d[p], d[p + 1], d[p + 2])) q.push(kk);
       }
     }
-    return { x: sx / area, y: sy / area, r: clamp(Math.sqrt(area / Math.PI) * 1.05, 2, 40), color: c };
+    return { x: sx / area, y: sy / area, r: clamp(Math.sqrt(area / Math.PI), 2, 60) };
   }
   function videoBox() {
-    const W = ov.width, H = ov.height, va = (vid.videoWidth || 16) / (vid.videoHeight || 9), ca = W / H;
+    const W = ov.width, H = ov.height, va = (srcW || 16) / (srcH || 9), ca = W / H;
     if (va > ca) { const h = W / va; return { x: 0, y: (H - h) / 2, w: W, h }; }
     const w = H * va; return { x: (W - w) / 2, y: 0, w, h: H };
   }
@@ -508,44 +628,51 @@ const Cam = (() => {
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    const d = grab(), m = measureAt(d, nx * PW, ny * PH);
-    learnedColor = m.color; store.set('ballColor', m.color);
+    const d = grab(); DETECT.detect(d, PW, PH);
+    const m = measureAt(d, nx * PW, ny * PH);
     needTap = false; becomeReady(d, m); toast('ボールを登録しました');
   });
-  $('retap').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } needTap = true; setDark(false); toSearch(); document.getElementById('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+  $('retap').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } needTap = true; setDark(false); toSearch(); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
 
-  function params() { const br = Math.max(2, ball.r * S.rad); return { br, area: Math.PI * br * br, CT: 80 * S.sens, DT: 26 / S.sens }; }
-  function fracAt(d, x, y, r) {
-    let hit = 0, n = 0; const R = Math.max(1.5, r * 0.8);
-    for (let yy = Math.floor(y - R); yy <= y + R; yy++) for (let xx = Math.floor(x - R); xx <= x + R; xx++) {
-      if (xx < 0 || yy < 0 || xx >= PW || yy >= PH || Math.hypot(xx - x, yy - y) > R) continue;
-      n++; if (cdist(d, (yy * PW + xx) * 4, ball.color) < 80 * S.sens) hit++;
+  function params() { const br = Math.max(2, ball.r * S.rad); return { br, area: Math.PI * br * br, CT: 85 * S.sens, DT: 26 / S.sens }; }
+  // ボールの下側(マットに重なる部分)で、ボールの色の画素がどれだけ残っているか
+  function ballFrac(d) {
+    let hit = 0, n = 0; const R = Math.max(1.5, ball.r * 0.8), CT = 85 * S.sens;
+    for (let yy = Math.floor(ball.y - R * 0.4); yy <= ball.y + R; yy++) for (let xx = Math.floor(ball.x - R); xx <= ball.x + R; xx++) {
+      if (xx < 0 || yy < 0 || xx >= PW || yy >= PH || Math.hypot(xx - ball.x, yy - ball.y) > R) continue;
+      const p = (yy * PW + xx) * 4; n++;
+      if (!DETECT.isGreenPx(d[p], d[p + 1], d[p + 2]) && palDist(d, p) < CT) hit++;
     }
     return n ? hit / n : 0;
   }
   function becomeReady(d, b) {
-    ball = { x: b.x, y: b.y, r: b.r, color: b.color };
-    readyFrac = Math.max(0.2, fracAt(d, ball.x, ball.y, ball.r)); low = 0;
-    setState('ready');
+    ball = { x: b.x, y: b.y, r: b.r }; lastPresentT = performance.now() / 1000;
+    pal = DETECT.palette(d, PW, PH, ball) || pal;
+    readyFrac = Math.max(0.2, ballFrac(d)); low = 0;
+    // 計測はできるが、もっと良くなる置き方があれば一言添える
+    const tip = ball.y < PH * 0.55 ? 'ボールが画面の下の方に写るようにすると、高く上がる球も追いやすくなります' : '';
+    setState('ready', tip || undefined);
   }
   function trackStep(d, t, P) {
     let pred, wx0, wx1, wy0, wy1;
     if (!pts.length) { pred = [ball.x, ball.y]; wx0 = ball.x - 16 * P.br; wx1 = ball.x + 16 * P.br; wy0 = ball.y - 16 * P.br; wy1 = ball.y + 1.5 * P.br; }
     else {
       const L = pts[pts.length - 1]; let vx = 0, vy = 0;
-      if (pts.length >= 2) { const Q = pts[pts.length - 2]; const dt = (L.t - Q.t) || 1 / 60; vx = (L.x - Q.x) / dt; vy = (L.y - Q.y) / dt; }
+      // 1点目しかないときは、止まっていた位置からの動きで速さを見積もる
+      const Q = pts.length >= 2 ? pts[pts.length - 2] : { x: ball.x, y: ball.y, t: lastPresentT };
+      const dt = Math.max(1 / 240, L.t - Q.t); vx = (L.x - Q.x) / dt; vy = (L.y - Q.y) / dt;
       const dtn = t - L.t; pred = [L.x + vx * dtn, L.y + vy * dtn];
-      const rad = Math.max(6 * P.br, 1.8 * Math.hypot(vx, vy) * dtn);
+      const rad = Math.max(6 * P.br, (pts.length >= 2 ? 1.8 : 2.4) * Math.hypot(vx, vy) * dtn);
       wx0 = pred[0] - rad; wx1 = pred[0] + rad; wy0 = pred[1] - rad; wy1 = Math.min(pred[1] + rad, ball.y + 1.5 * P.br);
     }
     wx0 = Math.max(0, Math.floor(wx0)); wx1 = Math.min(PW - 1, Math.ceil(wx1)); wy0 = Math.max(0, Math.floor(wy0)); wy1 = Math.min(PH - 1, Math.ceil(wy1));
-    const W = wx1 - wx0 + 1, H = wy1 - wy0 + 1; if (W <= 0 || H <= 0) { lost++; return lost >= 4; }
+    const W = wx1 - wx0 + 1, H = wy1 - wy0 + 1; if (W <= 0 || H <= 0 || !prev) { lost++; return lost >= 4; }
     const mask = new Uint8Array(W * H);
     for (let y = wy0; y <= wy1; y++) for (let x = wx0; x <= wx1; x++) {
       if (!pts.length && Math.hypot(x - ball.x, y - ball.y) < P.br) continue;
       const i = (y * PW + x) * 4;
       const mv = Math.abs(d[i] - prev[i]) + Math.abs(d[i + 1] - prev[i + 1]) + Math.abs(d[i + 2] - prev[i + 2]);
-      if (mv > P.DT && cdist(d, i, ball.color) < P.CT * 1.25) mask[(y - wy0) * W + (x - wx0)] = 1;
+      if (mv > P.DT && palDist(d, i) < P.CT * 1.25 && !DETECT.isGreenPx(d[i], d[i + 1], d[i + 2])) mask[(y - wy0) * W + (x - wx0)] = 1;
     }
     const seen = new Uint8Array(W * H); let best = null;
     for (let k0 = 0; k0 < W * H; k0++) {
@@ -556,31 +683,36 @@ const Cam = (() => {
         if (x < W - 1 && mask[k + 1] && !seen[k + 1]) { seen[k + 1] = 1; q.push(k + 1); }
         if (y > 0 && mask[k - W] && !seen[k - W]) { seen[k - W] = 1; q.push(k - W); }
         if (y < H - 1 && mask[k + W] && !seen[k + W]) { seen[k + W] = 1; q.push(k + W); } }
-      if (n < Math.max(2, P.area * 0.12) || n > P.area * 9) continue;
+      if (n < Math.max(3, P.area * 0.12) || n > P.area * 9) continue;
       const cx = sx / n + wx0, cy = sy / n + wy0, dist = Math.hypot(cx - pred[0], cy - pred[1]);
       if (!best || dist < best.dist) best = { x: cx, y: cy, dist };
     }
     if (best) { pts.push({ t, x: best.x, y: best.y }); lost = 0; }
     else if (pts.length) lost++;
+    else lost++;
     const edge = best && (best.x < 2 || best.x > PW - 3 || best.y < 2);
     return pts.length >= 10 || lost >= 4 || edge || (t - trackStart) > 0.5;
   }
   function finishTrack() {
     const P = params();
     lastTrack = pts.slice(); lastActive = Date.now();
-    if (pts.length < 3) { setState('error', 'ボールを追えませんでした。明るさや背景を確認して、もう一度どうぞ'); cooldownUntil = performance.now() + 1500; return; }
+    const f = Math.round(fps());
+    if (pts.length < 2) {
+      const tip = f && f < 45 ? `今は約${f}fpsで撮影されています。` : '';
+      setState('error', `飛んでいくボールを追えませんでした。${tip}ボールが画面の下の方に写るように置くと、上がっていく球を長く追えます`);
+      cooldownUntil = performance.now() + 2000; return;
+    }
     const ppm = (2 * P.br) / (S.diam / 1000), g = 9.81 * ppm, T0 = pts[0].t;
     const fit = (xs, ys) => { const n = xs.length, mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n; let a = 0, b = 0; for (let i = 0; i < n; i++) { a += (xs[i] - mx) * (ys[i] - my); b += (xs[i] - mx) ** 2; } return b ? a / b : 0; };
     const use = pts.slice(0, 8), ts = use.map(p => p.t - T0);
     const vx = fit(ts, use.map(p => p.x)), vy = fit(ts, use.map((p, i) => p.y - 0.5 * g * ts[i] * ts[i]));
     const mSpeed = Math.hypot(vx, vy) / ppm, mAngle = Math.atan2(-vy, Math.abs(vx)) * 180 / Math.PI;
-    if (!(mSpeed > 0.5 && mSpeed < 60) || mAngle < -10 || mAngle > 80) { setState('error', `計測値が不自然でした(${mSpeed.toFixed(1)}m/s, ${mAngle.toFixed(0)}°)。もう一度どうぞ`); cooldownUntil = performance.now() + 2000; return; }
-    learnedColor = ball.color; store.set('ballColor', ball.color);
+    if (!(mSpeed > 0.5 && mSpeed < 60) || mAngle < -10 || mAngle > 80) { setState('error', `計測値が不自然でした(${mSpeed.toFixed(1)}m/s、${mAngle.toFixed(0)}°)。もう一度どうぞ`); cooldownUntil = performance.now() + 2000; return; }
     const speed = clamp(mSpeed * S.factor, 1, 40), angle = clamp(mAngle + S.angOff, 0, 70);
     const spin = clamp(Math.round(290 * speed * (0.75 + angle / 120) * S.spin / 50) * 50, 500, 11000);
     const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: 0, spin };
     $('cSpeed').textContent = speed.toFixed(1) + ' m/s'; $('cAngle').textContent = angle.toFixed(1) + '°'; $('cSpin').textContent = spin + ' rpm';
-    $('cMeta').textContent = `練習ボールの計測値 ${mSpeed.toFixed(1)} m/s・${mAngle.toFixed(1)}° / 追跡 ${pts.length} コマ`;
+    $('cMeta').textContent = `練習ボールの計測値 ${mSpeed.toFixed(1)} m/s、${mAngle.toFixed(1)}°。追跡 ${pts.length} コマ、約${f}fps`;
     $('camResult').hidden = false;
     const ok = Net.send(shot);
     setState('done', ok ? 'iPadを見てください' : 'iPadと未接続のため送れていません');
@@ -594,12 +726,11 @@ const Cam = (() => {
     const b = videoBox(), sx = b.w / PW, sy = b.h / PH, dpr = devicePixelRatio;
     const p = ball || cand;
     if (p) {
-      octx.strokeStyle = state === 'ready' ? '#2fd07a' : '#e2b857'; octx.lineWidth = 3 * dpr;
-      octx.beginPath(); octx.arc(b.x + p.x * sx, b.y + p.y * sy, p.r * sx + 6 * dpr, 0, Math.PI * 2); octx.stroke();
-      if (state === 'search' && cand) { octx.fillStyle = '#e2b857'; octx.font = `${13 * dpr}px sans-serif`; octx.textAlign = 'center'; octx.fillText('認識中…', b.x + p.x * sx, b.y + (p.y - p.r) * sy - 12 * dpr); }
+      octx.strokeStyle = state === 'ready' ? '#1f9d55' : state === 'adjust' ? '#d63a2a' : '#ffd24a'; octx.lineWidth = 3 * dpr;
+      octx.beginPath(); octx.arc(b.x + p.x * sx, b.y + p.y * sy, p.r * sx + 5 * dpr, 0, Math.PI * 2); octx.stroke();
     }
     const tr = state === 'track' ? pts : (performance.now() < cooldownUntil ? lastTrack : null);
-    if (tr) { octx.fillStyle = '#ff6a4d'; tr.forEach(q => { octx.beginPath(); octx.arc(b.x + q.x * sx, b.y + q.y * sy, 5 * dpr, 0, Math.PI * 2); octx.fill(); }); }
+    if (tr) { octx.fillStyle = '#d63a2a'; tr.forEach(q => { octx.beginPath(); octx.arc(b.x + q.x * sx, b.y + q.y * sy, 5 * dpr, 0, Math.PI * 2); octx.fill(); }); }
     if (needTap) {
       octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(0, H - 44 * dpr, W, 44 * dpr);
       octx.fillStyle = '#fff'; octx.font = `${15 * dpr}px sans-serif`; octx.textAlign = 'center';
@@ -609,23 +740,30 @@ const Cam = (() => {
 
   function frame(t) {
     frameN++;
+    ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
+    if (vid.videoWidth !== srcW || vid.videoHeight !== srcH) { setupProc(); toSearch(); }   // 向きが変わった
     const busy = state === 'ready' || state === 'track';
-    // 探している間は2コマに1回だけ解析して発熱を抑える
+    // ボールを探している間は2コマに1回だけ解析して、発熱を抑える
     if (!busy && frameN % 2 !== 0) return;
     const d = grab();
     if (state === 'track') { if (trackStep(d, t, params())) finishTrack(); }
     else if (performance.now() < cooldownUntil) { /* 結果表示中 */ }
     else if (state === 'ready') {
-      const f = fracAt(d, ball.x, ball.y, ball.r);
-      if (f < readyFrac * 0.4) { low++; if (low >= 2) { setState('track'); trackStart = t; pts = []; lost = 0; } }
-      else low = 0;
+      const f = ballFrac(d);
+      // ボールの色が消えたコマ=打った瞬間。そのコマから追跡を始める
+      if (f < readyFrac * 0.4) { setState('track'); trackStart = t; pts = []; lost = 0; if (trackStep(d, t, params())) finishTrack(); }
+      else lastPresentT = t;
     } else if (!needTap) {
-      if (state !== 'search') toSearch();
-      const c = findAuto(d);
-      if (c && cand && Math.hypot(c.x - cand.x, c.y - cand.y) < Math.max(1.2, 0.35 * c.r) && Math.abs(c.r - cand.r) < 0.35 * cand.r) stable++;
+      const c = DETECT.detect(d, PW, PH);
+      if (c && cand && Math.hypot(c.x - cand.x, c.y - cand.y) < Math.max(1.2, 0.3 * c.r) && Math.abs(c.r - cand.r) < 0.25 * cand.r) stable++;
       else stable = 0;
       cand = c;
-      if (c && stable >= 8) becomeReady(d, c);
+      if (!c) { if (state !== 'search') toSearch(); }
+      else if (stable >= STABLE) {
+        issue = setupIssue(c);
+        if (issue) { if (state !== 'adjust' || lastSent !== 'adjust' + issue) setState('adjust'); }
+        else becomeReady(d, c);
+      }
     }
     prev = d;
     if (!dark) drawOverlay();
@@ -641,8 +779,6 @@ const Cam = (() => {
     }
   }
   setButtons();
-  // テスト用:合成画像で自動認識を確かめる
-  window.__oaFindAuto = (d) => findAuto(d);
   return { pushStatus, onInfo };
 })();
 
@@ -1204,7 +1340,7 @@ const App = (() => {
   }
   const num = (v, a, b) => { v = Number(v); return Number.isFinite(v) ? clamp(v, a, b) : null; };
   function onMessage(m) {
-    if (m.type === 'status') { if (['wait', 'ready', 'track', 'off'].includes(m.state)) setReady(m.state); return; }
+    if (m.type === 'status') { if (['wait', 'ready', 'track', 'off', 'adjust'].includes(m.state)) setReady(m.state, ['portrait', 'near', 'far'].includes(m.issue) ? m.issue : 'near'); return; }
     if (m.type === 'shot') {
       const s = { id: String(m.id || '').slice(0, 32), speed: num(m.speed, 1, 40), angle: num(m.angle, 0, 70), dir: num(m.dir, -30, 30) ?? 0, spin: num(m.spin, 0, 12000) };
       if (!s.id || s.speed == null || s.angle == null || s.spin == null) return;
@@ -1213,9 +1349,12 @@ const App = (() => {
   }
   const READY_TEXT = { off: 'カメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中…' };
   const HOME_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中' };
-  function setReady(s) {
+  const ADJUST_TEXT = { portrait: 'iPhoneを横向きにしてください', near: 'カメラが近すぎます。1m前後離してください', far: 'カメラが遠すぎます。少し近づけてください' };
+  function setReady(s, iss) {
     const was = readyState; readyState = s;
-    $('readyMark').dataset.state = s; $('readyText').textContent = READY_TEXT[s] || '';
+    const adj = s === 'adjust' ? ADJUST_TEXT[iss] || ADJUST_TEXT.near : '';
+    $('readyMark').dataset.state = s; $('readyText').textContent = adj || READY_TEXT[s] || '';
+    if (s === 'adjust') { $('world').dataset.ready = 'adjust'; $('homeReady').dataset.state = 'adjust'; $('homeReadyText').textContent = adj; $('gs2').classList.remove('done'); return; }
     $('world').dataset.ready = s;
     $('homeReady').dataset.state = s; $('homeReadyText').textContent = HOME_TEXT[s] || '';
     $('gs2').classList.toggle('done', paired && s !== 'off');
