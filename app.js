@@ -186,6 +186,23 @@ const store = {
 };
 function toast(t) { const el = $('toast'); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => { el.hidden = true; }, 3200); }
 function setConn(state, text) { $('connDot').className = 'dot ' + (state || ''); $('connText').textContent = text; }
+/* 生成したイラスト。img/ に同名ファイルがあればそちらを優先する */
+const ART_CDN = 'https://d8j0ntlcm91z4.cloudfront.net/user_3HJhNJAXEinI1BPtZI7pPcGddZP/hf_20260930_035851_';
+const ART = { hero: 'f7f7c32d-d4e0-4a8f-9766-afc2f2b7cdd4', free: '9315a2f3-e9b5-4faa-9aa4-aa445136cbfc', course: '40d67dd4-2854-49a6-883d-7488665e4e7b',
+  p2s: 'fb58a3a6-7a83-4f3d-ade8-4605a950cb68', p2t: '1ba9554f-54ca-48b5-96e0-0167c3e4f6d9', p3s: 'e9c16715-1d85-4718-b731-c10f0524dff9',
+  p3t: '39cc3ca0-15fa-4eb1-b9b8-5da0cda21fe2', p4s: '3a78c7e0-3b1b-44b1-9287-4ccff75cd0a2', p4t: '9c388d3e-2d97-4b43-a67b-b15e95b4c754' };
+const artCache = {};
+function artUrl(key) {
+  if (!artCache[key]) artCache[key] = new Promise(res => {
+    const local = new Image();
+    local.onload = () => res(`img/${key}.webp`);
+    local.onerror = () => { const cdn = ART[key] ? `${ART_CDN}${ART[key]}_min.webp` : null; if (!cdn) return res(null); const im = new Image(); im.onload = () => res(cdn); im.onerror = () => res(null); im.src = cdn; };
+    local.src = `img/${key}.webp`;
+  });
+  return artCache[key];
+}
+function paintArt(node, key) { artUrl(key).then(u => { if (u) node.style.backgroundImage = `url("${u}")`; }); }
+function paintAll(root) { (root || document).querySelectorAll('[data-img]').forEach(n => paintArt(n, n.dataset.img)); }
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
 /* ---------------- views & role ---------------- */
@@ -663,20 +680,25 @@ const World = (() => {
     renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
     renderer.setPixelRatio(Math.min(1.5, devicePixelRatio)); renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     world.prepend(renderer.domElement);
-    scene = new THREE.Scene(); scene.fog = new THREE.Fog('#cfe3ea', 90, 260);
+    scene = new THREE.Scene(); scene.fog = new THREE.Fog('#dfe6dc', 80, 260);
     cam = new THREE.PerspectiveCamera(48, 16 / 10, 0.05, 600);
     // sky dome with vertical gradient
     const skyGeo = new THREE.SphereGeometry(500, 32, 16); const cols = []; const pos = skyGeo.attributes.position;
-    const top = new THREE.Color('#3f86c8'), hor = new THREE.Color('#d7ebf1'), tmp = new THREE.Color();
+    const top = new THREE.Color('#5c9bd1'), hor = new THREE.Color('#f3e2c4'), tmp = new THREE.Color();
     for (let i = 0; i < pos.count; i++) { const y = pos.getY(i) / 500; tmp.copy(hor).lerp(top, clamp(y * 1.6, 0, 1)); cols.push(tmp.r, tmp.g, tmp.b); }
     skyGeo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
     scene.add(new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false })));
-    scene.add(new THREE.HemisphereLight('#eef7ff', '#35502a', 0.72));
-    const sun = new THREE.DirectionalLight('#fff1d6', 0.85); sun.position.set(-30, 60, 25); sun.castShadow = true;
+    scene.add(new THREE.HemisphereLight('#fff6e6', '#3a5230', 0.7));
+    // 朝日と雲
+    const glow = texCanvas(128, 128, (c2, w, h) => { const g2 = c2.createRadialGradient(64, 64, 4, 64, 64, 64); g2.addColorStop(0, 'rgba(255,248,225,1)'); g2.addColorStop(0.25, 'rgba(255,226,170,.8)'); g2.addColorStop(1, 'rgba(255,210,150,0)'); c2.fillStyle = g2; c2.fillRect(0, 0, w, h); }, 1);
+    const sunS = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, fog: false, depthWrite: false, transparent: true })); sunS.scale.set(120, 120, 1); sunS.position.set(420, 70, 160); scene.add(sunS);
+    const cloudT = texCanvas(256, 128, (c2, w, h) => { for (let i = 0; i < 18; i++) { const x = 40 + Math.random() * 176, y = 50 + Math.random() * 40, r = 18 + Math.random() * 26; const g2 = c2.createRadialGradient(x, y, 2, x, y, r); g2.addColorStop(0, 'rgba(255,255,255,.9)'); g2.addColorStop(1, 'rgba(255,255,255,0)'); c2.fillStyle = g2; c2.fillRect(0, 0, w, h); } }, 1);
+    for (let i = 0; i < 9; i++) { const cl = new THREE.Sprite(new THREE.SpriteMaterial({ map: cloudT, fog: false, depthWrite: false, transparent: true, opacity: 0.85 })); const a2 = -0.9 + i * 0.22 + rand(-.05, .05); cl.scale.set(rand(90, 150), rand(30, 50), 1); cl.position.set(60 + Math.cos(a2) * 380, rand(60, 120), Math.sin(a2) * 380); scene.add(cl); }
+    const sun = new THREE.DirectionalLight('#ffe9c4', 0.9); sun.position.set(-40, 45, 30); sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 90, bottom: -90, far: 200 });
     sun.target.position.set(45, 0, 0); scene.add(sun, sun.target);
     // distant hills
-    const hillMat = new THREE.MeshLambertMaterial({ color: '#5f8a63', flatShading: true });
+    const hillMat = new THREE.MeshLambertMaterial({ color: '#7d9f86', flatShading: true });
     for (let i = 0; i < 26; i++) { const a = (i / 26) * Math.PI * 2 + rand(-.1, .1), r = rand(230, 300); const h = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), hillMat); h.scale.set(rand(40, 80), rand(14, 34), rand(40, 80)); h.position.set(60 + Math.cos(a) * r, -4, Math.sin(a) * r); scene.add(h); }
     ballM = new THREE.Mesh(new THREE.SphereGeometry(0.065, 24, 16), new THREE.MeshPhongMaterial({ color: '#ffffff', shininess: 60 })); ballM.castShadow = true; scene.add(ballM);
     shadow = new THREE.Mesh(new THREE.CircleGeometry(0.075, 16), new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: .28, depthWrite: false })); shadow.rotation.x = -Math.PI / 2; shadow.renderOrder = 60; scene.add(shadow);
@@ -884,22 +906,22 @@ const Profile = (() => {
     size(); const W = cv.width, H = cv.height, dpr = devicePixelRatio;
     ctx.clearRect(0, 0, W, H);
     const pad = 10 * dpr, base = H - 18 * dpr;
-    ctx.fillStyle = 'rgba(200,220,205,.75)'; ctx.font = `${10 * dpr}px sans-serif`; ctx.textAlign = 'left';
+    ctx.fillStyle = '#526a5a'; ctx.font = `600 ${11 * dpr}px sans-serif`; ctx.textAlign = 'left';
     ctx.fillText('弾道(横から)', pad, 13 * dpr);
-    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * dpr; ctx.beginPath(); ctx.moveTo(pad, base); ctx.lineTo(W - pad, base); ctx.stroke();
+    ctx.strokeStyle = '#2f6b3a'; ctx.lineWidth = 2 * dpr; ctx.beginPath(); ctx.moveTo(pad, base); ctx.lineTo(W - pad, base); ctx.stroke();
     if (!cur) return;
     const r = cur.res, p = r.pts, s = p[0];
     const hx = (q) => Math.hypot(q[1] - s[1], q[3] - s[3]);
     const maxD = Math.max(yd(r.total) * 1.12, 10), maxH = Math.max(r.apex * 1.3, 2);
     const X = (m) => pad + (yd(m) / maxD) * (W - 2 * pad), Y = (h) => base - (Math.max(h, 0) / maxH) * (base - 22 * dpr);
     const n = Math.max(1, Math.floor(cur.frac * (p.length - 1)));
-    ctx.strokeStyle = '#ffe38a'; ctx.lineWidth = 2.2 * dpr; ctx.beginPath();
+    ctx.strokeStyle = '#d63a2a'; ctx.lineWidth = 2.4 * dpr; ctx.setLineDash([]); ctx.beginPath();
     for (let i = 0; i <= n; i++) { const q = p[i]; i ? ctx.lineTo(X(hx(q)), Y(q[2])) : ctx.moveTo(X(hx(q)), Y(q[2])); }
     ctx.stroke();
-    ctx.fillStyle = '#c3d1c8'; ctx.font = `${10 * dpr}px ui-monospace,monospace`;
+    ctx.fillStyle = '#16301f'; ctx.font = `700 ${12 * dpr}px "Avenir Next Condensed","Arial Narrow",sans-serif`;
     if (cur.frac >= 1) {
-      ctx.fillStyle = '#ffe38a'; ctx.beginPath(); ctx.arc(X(r.carry), base, 3 * dpr, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#c3d1c8'; ctx.textAlign = 'center';
+      ctx.fillStyle = '#d63a2a'; ctx.beginPath(); ctx.arc(X(r.carry), base, 3.5 * dpr, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#16301f'; ctx.textAlign = 'center';
       ctx.fillText(`キャリー ${fy(r.carry)}yd`, clamp(X(r.carry), 50 * dpr, W - 50 * dpr), H - 4 * dpr);
       ctx.textAlign = 'right'; ctx.fillText(`最高 ${r.apex.toFixed(1)}m`, W - pad, 13 * dpr);
     }
@@ -913,7 +935,7 @@ const Profile = (() => {
 const App = (() => {
   let limit = store.get('limit', 35), nPlayers = store.get('np', 1);
   const names = [store.get('name0', 'プレイヤー1'), store.get('name1', 'プレイヤー2')];
-  const COLORS = ['#ff6a4d', '#5b9bff'];
+  const COLORS = ['#e2432f', '#2d6fd1'];
   let G = null, readyState = 'off', paired = false;
   const seen = new Set();
   const limitM = () => limit * YD;
@@ -928,7 +950,7 @@ const App = (() => {
     const u = COURSES.unitYd(limit);
     $('limitNote').textContent = `ホールの長さ:パー2 ${u}ヤード/パー3 ${u * 2}ヤード/パー4 ${u * 3}ヤード`;
     $('soundOn').checked = Sound.on(); $('soundOn').onchange = () => store.set('sound', $('soundOn').checked);
-    setReady(readyState); setPaired(paired);
+    setReady(readyState); setPaired(paired); paintAll($('homeView'));
   }
   function setPaired(p) { paired = p; $('gs1').classList.toggle('done', p); if (!p) $('gs2').classList.remove('done'); }
   $('goFree').onclick = () => { buildDist(); show('freeView'); };
@@ -938,7 +960,7 @@ const App = (() => {
   function buildDist() {
     const g = $('distGrid'); g.textContent = '';
     [5, 10, 15, 20, 25, 30, 35, 40, 45, 60].forEach(d => {
-      const b = el('button', d === 60 ? 'strong' : null); b.append(String(d), el('small', null, d === 60 ? 'ヤード・強めに' : 'ヤード'));
+      const b = el('button', d === 60 ? 'strong' : null); b.append(el('b', null, String(d)), el('small', null, d === 60 ? 'ヤード 強めに打つ練習' : 'ヤード'));
       b.onclick = () => startFree(d); g.append(b);
     });
   }
@@ -950,9 +972,15 @@ const App = (() => {
     COURSES.defs.forEach(d => {
       const c = COURSES.make(d.id, limit);
       const b = el('button', 'ccard');
-      const cv = document.createElement('canvas'); cv.width = 480; cv.height = 360; drawMini(cv, c);
-      const meta = el('div', 'meta'); meta.append(el('span', 'par', `PAR ${c.par}・${c.lengthYd}YD`), el('span', 'style' + (d.style === 'テクニカル' ? ' tech' : ''), d.style));
-      b.append(cv, meta, el('b', null, c.name), el('span', 'd', c.desc));
+      const art = el('span', 'art'); paintArt(art, d.id);
+      const cv = document.createElement('canvas'); cv.width = 300; cv.height = 400; drawMini(cv, c); art.append(cv);
+      const body = el('span', 'cbody');
+      const stat = el('span', 'stat');
+      const s1 = el('span'); s1.append('パー ', el('strong', null, String(c.par)));
+      const s2 = el('span'); s2.append(el('strong', null, String(c.lengthYd)), ' ヤード');
+      stat.append(s1, s2);
+      body.append(el('b', null, c.name), stat, el('span', 'style' + (d.style === 'テクニカル' ? ' tech' : ''), d.style), el('span', 'd', c.desc));
+      b.append(art, body);
       b.onclick = () => startCourse(d.id);
       g.append(b);
     });
@@ -963,26 +991,28 @@ const App = (() => {
     let minX = -6, maxX = c.pin.x + 10, minZ = -12, maxZ = 12;
     const ext = (x, z) => { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z); };
     c.shapes.forEach(s => { if (s.kind === 'ellipse') { ext(s.cx - s.rx, s.cz - s.rz); ext(s.cx + s.rx, s.cz + s.rz); } else if (s.kind === 'rect') { ext(s.x0, s.z0); ext(s.x1, s.z1); } else s.pts.forEach(([x, z]) => ext(x, z)); });
-    minZ = Math.max(minZ, -70); maxZ = Math.min(maxZ, 70); maxX = Math.min(maxX, c.pin.x + 16); minX = Math.max(minX, -8);
-    const sc = Math.min((H - 24) / (maxX - minX), (W - 24) / (maxZ - minZ));
-    const ox = W / 2 - ((minZ + maxZ) / 2) * sc, oy = H - 12 + minX * sc;
+    minZ = Math.max(minZ, -70); maxZ = Math.min(maxZ, 70); maxX = Math.min(maxX, c.pin.x + 14); minX = Math.max(minX, -6);
+    const sc = Math.min((H - 40) / (maxX - minX), (W - 28) / (maxZ - minZ));
+    const ox = W / 2 - ((minZ + maxZ) / 2) * sc, oy = H - 14 + minX * sc;
     const P = (x, z) => [ox + z * sc, oy - x * sc];
-    const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#24552a'); bg.addColorStop(1, '#1b4221'); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-    for (let i = 0; i < 900; i++) { ctx.fillStyle = `rgba(0,0,0,${Math.random() * .12})`; ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
-    const path = (s, grow) => { ctx.beginPath(); const g2 = grow || 0; if (s.kind === 'ellipse') { const [x, y] = P(s.cx, s.cz); ctx.ellipse(x, y, (s.rz + g2) * sc, (s.rx + g2) * sc, 0, 0, Math.PI * 2); } else if (s.kind === 'rect') { const [x0, y0] = P(s.x1, s.z0), [x1, y1] = P(s.x0, s.z1); ctx.rect(x0, y0, x1 - x0, y1 - y0); } else { s.pts.forEach(([x, z], i) => { const [a, b] = P(x, z); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.closePath(); } };
-    const fill = (s, col, grow) => { path(s, grow); ctx.fillStyle = col; ctx.fill(); };
-    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => fill(s, '#58a347'));
-    c.shapes.filter(s => s.type === 'water').forEach(s => { fill(s, '#c9b88c', 0.9); fill(s, '#2f7fb6'); });
-    c.shapes.filter(s => s.type === 'chasm').forEach(s => { fill(s, '#120e0b'); path(s); ctx.strokeStyle = '#7a6450'; ctx.lineWidth = 2; ctx.stroke(); });
-    c.shapes.filter(s => s.top && s.type === 'rough').forEach(s => fill(s, '#2f6a2b'));
-    c.shapes.filter(s => s.top && s.type === 'fairway').forEach(s => fill(s, '#58a347'));
-    c.shapes.filter(s => s.type === 'green').forEach(s => { fill(s, '#4f9a45', 1.2); fill(s, '#8ad672'); });
+    ctx.fillStyle = '#fbfaf5'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(22,48,31,.08)'; ctx.lineWidth = 1;
+    for (let y = 0; y < H; y += 14) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    const path = (s, grow) => { ctx.beginPath(); const g2 = grow || 0; if (s.kind === 'ellipse') { const [x, y] = P(s.cx, s.cz); ctx.ellipse(x, y, Math.max(1, (s.rz + g2) * sc), Math.max(1, (s.rx + g2) * sc), 0, 0, Math.PI * 2); } else if (s.kind === 'rect') { const [x0, y0] = P(s.x1, s.z0), [x1, y1] = P(s.x0, s.z1); ctx.rect(x0, y0, x1 - x0, y1 - y0); } else { s.pts.forEach(([x, z], i) => { const [a, b] = P(x, z); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.closePath(); } };
+    const draw = (s, fill, stroke, grow) => { path(s, grow); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke(); } };
+    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => draw(s, '#cfe6bf', '#5d8f58'));
+    c.shapes.filter(s => s.type === 'water').forEach(s => draw(s, '#bcdcf0', '#3f82b5'));
+    c.shapes.filter(s => s.type === 'chasm').forEach(s => { draw(s, '#e9e1d4', '#6b5540'); path(s); ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(107,85,64,.55)'; for (let k = -H; k < W + H; k += 6) { ctx.beginPath(); ctx.moveTo(k, 0); ctx.lineTo(k + H, H); ctx.stroke(); } ctx.restore(); });
+    c.shapes.filter(s => s.top && s.type === 'rough').forEach(s => draw(s, '#e8efe0', '#8aa37f'));
+    c.shapes.filter(s => s.top && s.type === 'fairway').forEach(s => draw(s, '#cfe6bf', '#5d8f58'));
+    c.shapes.filter(s => s.type === 'green').forEach(s => { draw(s, '#a9d690', '#2f6b3a'); for (const k of [0.35, 0.65]) { path({ ...s, rx: s.rx * k, rz: s.rz * k }); ctx.strokeStyle = 'rgba(47,107,58,.45)'; ctx.lineWidth = 1; ctx.stroke(); } });
     const [px, py] = P(c.pin.x, c.pin.z), [tx, ty] = P(0, 0);
-    ctx.strokeStyle = 'rgba(255,240,190,.85)'; ctx.setLineDash([7, 6]); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(tx, ty);
+    ctx.strokeStyle = '#16301f'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(tx, ty);
     c.route.filter(r => !c.shapes.some(s => s.island && SIM.inShape(s, r.x, r.z))).forEach(r => { const [x, y] = P(r.x, r.z); ctx.lineTo(x, y); }); ctx.lineTo(px, py); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(tx, ty, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py - 16); ctx.stroke();
-    ctx.fillStyle = '#e0412a'; ctx.beginPath(); ctx.moveTo(px, py - 16); ctx.lineTo(px + 11, py - 12); ctx.lineTo(px, py - 8); ctx.fill();
+    ctx.fillStyle = '#16301f'; ctx.fillRect(tx - 6, ty - 3, 12, 6);
+    ctx.strokeStyle = '#16301f'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py - 16); ctx.stroke();
+    ctx.fillStyle = '#d63a2a'; ctx.beginPath(); ctx.moveTo(px, py - 16); ctx.lineTo(px + 10, py - 12.5); ctx.lineTo(px, py - 9); ctx.fill();
+    ctx.fillStyle = '#16301f'; ctx.font = '600 15px "Avenir Next Condensed","Arial Narrow",sans-serif'; ctx.textAlign = 'left'; ctx.fillText(`${c.lengthYd}Y`, 8, 18);
   }
 
   /* ---- play common ---- */
@@ -1021,15 +1051,15 @@ const App = (() => {
     G = { mode: 'free', yd: d, course: c, shots: [], busy: false };
     enterPlay('free');
     World.load(c); World.setAim(c.tee, 0, freeReach());
-    $('hTitle').textContent = 'フリー練習'; $('hMain').textContent = `ピンまで ${d}ヤード`; $('hExtra').textContent = '全面グリーン';
-    $('hTurn').textContent = 'グリーン'; $('hSub').textContent = `速さ ${c.stimp}ft`; $('hLie').textContent = 'マットから';
+    $('hTitle').textContent = 'フリー練習'; $('hMain').textContent = `${d}ヤード`; $('hExtra').textContent = `全面グリーン、速さ${c.stimp}フィート`;
+    $('hTurn').textContent = 'ピンまで'; $('hSub').textContent = `${d} yd`; $('hLie').textContent = 'マットから打つ'; $('hLie').className = 's';
     World.onTap(null);
     renderFree(); sendInfo();
   }
   function afterFree(res) {
     const ok = res.holed || res.toPin <= 2;
     G.shots.push({ total: res.total, toPin: res.toPin, ok, holed: res.holed });
-    World.addMarker(res.end.x, res.end.z, ok ? '#ffe38a' : '#ffffff');
+    World.addMarker(res.end.x, res.end.z, ok ? '#ffd24a' : '#ffffff');
     if (res.holed) { banner('カップイン!', null, 2600, 'good'); Sound.good(); }
     else if (ok) { banner('OK!', `ピンまで ${fDist(res.toPin)}`, 2600, 'good'); Sound.good(); }
     else banner(`ピンまで ${fDist(res.toPin)}`, null, 2000);
@@ -1063,7 +1093,7 @@ const App = (() => {
     G = { mode: 'course', course: c, players, cur: 0, aim: 0, busy: false };
     enterPlay('course');
     World.load(c);
-    $('hTitle').textContent = `PAR ${c.par}・${c.style}`; $('hMain').textContent = c.name; $('hExtra').textContent = `${c.lengthYd}ヤード・上限${limit}ヤード`;
+    $('hTitle').textContent = `パー${c.par}  ${c.lengthYd}ヤード`; $('hMain').textContent = c.name; $('hExtra').textContent = `上限${limit}ヤード`;
     $('aimRoute').hidden = !c.route.length;
     World.onTap((x, z) => { if (!G || G.mode !== 'course' || G.busy) return; const p = G.players[G.cur]; if (Math.hypot(x - p.pos.x, z - p.pos.z) < 1) return; G.aim = headingTo(p.pos, { x, z }); World.setAim(p.pos, G.aim, limitM()); });
     beginTurn();
@@ -1079,9 +1109,9 @@ const App = (() => {
     World.setBalls(G.players.filter((q, k) => k !== i && !q.done && dist(q.pos, p.pos) > 0.4).map(q => ({ x: q.pos.x, z: q.pos.z, color: q.color })));
     World.setAim(p.pos, G.aim, limitM());
     const lie = lieOf(p.pos);
-    $('hTurn').textContent = `${G.players.length > 1 ? p.name + '・' : ''}${p.strokes + 1}打目`;
-    $('hSub').textContent = `残り ${fy(dist(p.pos, G.course.pin))}yd`;
-    $('hLie').textContent = lie === '絨毯' ? 'ラフ:絨毯から打つ' : 'マットから打つ';
+    $('hTurn').textContent = `${G.players.length > 1 ? p.name + ' ' : ''}${p.strokes + 1}打目  残り`;
+    $('hSub').textContent = `${fy(dist(p.pos, G.course.pin))} yd`;
+    $('hLie').textContent = lie === '絨毯' ? 'ラフ:絨毯から打つ' : 'マットから打つ'; $('hLie').className = 's' + (lie === '絨毯' ? ' rough' : '');
     if (lie === '絨毯') banner('ラフ', '絨毯の上から打ってください', 3000);
     else if (G.players.length > 1) banner(`${p.name} の番`, `${lie}から打ってください`, 2200);
     renderCourse(); sendInfo();
@@ -1100,12 +1130,12 @@ const App = (() => {
   };
   function afterCourse(p, res) {
     const par = G.course.par; let msg = '', sub = '', kind = '', tone = '';
-    if (res.hazard) { p.strokes += 2; msg = res.hazard === 'water' ? '池ポチャ' : '崖から落下'; sub = '1打罰・元の場所から打ち直し'; kind = 'ペナルティ'; tone = 'bad'; }
-    else if (res.total >= limitM() - 1e-6) { p.strokes += 2; msg = '上限オーバー'; sub = `総距離 ${fy(res.total)}ヤード・1打罰・元の場所から打ち直し`; kind = '上限オーバー'; tone = 'bad'; }
+    if (res.hazard) { p.strokes += 2; msg = res.hazard === 'water' ? '池ポチャ' : '崖から落下'; sub = '1打罰、元の場所から打ち直し'; kind = 'ペナルティ'; tone = 'bad'; }
+    else if (res.total >= limitM() - 1e-6) { p.strokes += 2; msg = '上限オーバー'; sub = `総距離 ${fy(res.total)}ヤード、1打罰で打ち直し`; kind = '上限オーバー'; tone = 'bad'; }
     else {
       p.strokes += 1; p.pos = { x: res.end.x, z: res.end.z };
       if (res.holed) { p.done = true; p.score = p.strokes; msg = 'カップイン!'; kind = 'カップイン'; tone = 'good'; }
-      else if (res.toPin <= 2) { p.done = true; p.score = p.strokes + 1; msg = 'OK!'; sub = `ピンまで ${fDist(res.toPin)}・+1打で上がり`; kind = 'OK'; tone = 'good'; }
+      else if (res.toPin <= 2) { p.done = true; p.score = p.strokes + 1; msg = 'OK!'; sub = `ピンまで ${fDist(res.toPin)}、+1打で上がり`; kind = 'OK'; tone = 'good'; }
       else { const z = SIM.zoneAt(G.course, p.pos.x, p.pos.z); msg = `残り ${fy(res.toPin)}ヤード`; const island = G.course.shapes.some(s => s.island && SIM.inShape(s, p.pos.x, p.pos.z)); sub = island ? 'ナイス!浮島にオン' : z === 'rough' ? 'ラフ:次は絨毯から' : z === 'green' ? 'グリーン' : z === 'fringe' ? 'カラー' : 'フェアウェイ'; kind = island ? '浮島' : z === 'rough' ? 'ラフ' : z === 'green' ? 'グリーン' : 'フェアウェイ'; if (island) tone = 'good'; }
     }
     if (!p.done && p.strokes >= 2 * par) { p.done = true; p.gaveUp = true; p.score = 2 * par; msg = 'ギブアップ'; sub = `ダブルパー(${2 * par}打)で打ち切り`; tone = 'bad'; }
@@ -1125,7 +1155,7 @@ const App = (() => {
     G.players.forEach((p, i) => {
       const c = el('div', `pcard ${p.cls}` + (i === G.cur && !p.done ? ' turn' : ''));
       c.append(el('i'), el('b', null, p.name), el('span', 'sc', p.done ? String(p.score) : String(p.strokes)));
-      c.append(el('span', 'st', p.done ? `${p.gaveUp ? 'ギブアップ' : '上がり'}・${scoreName(p.score, par)}` : `${p.strokes}打・残り ${fy(dist(p.pos, G.course.pin))}yd・${lieOf(p.pos)}から`));
+      c.append(el('span', 'st', p.done ? `${p.gaveUp ? 'ギブアップ' : '上がり'} ${scoreName(p.score, par)}` : `残り ${fy(dist(p.pos, G.course.pin))}yd、${lieOf(p.pos)}から`));
       wrap.append(c);
     });
     const t = $('courseLog'); t.textContent = '';
@@ -1141,7 +1171,7 @@ const App = (() => {
     const best = Math.min(...ps.map(p => p.score));
     const hr = el('tr'); ['プレイヤー', '打数', '結果'].forEach((h, i) => hr.append(el('th', i === 1 ? 'n' : null, h))); tb.append(hr);
     ps.forEach(p => { const r = el('tr', ps.length > 1 && p.score === best ? 'win' : null); r.append(el('td', null, p.name), el('td', 'n', String(p.score)), el('td', null, (p.gaveUp ? 'ギブアップ ' : '') + scoreName(p.score, par))); tb.append(r); });
-    $('resKicker').textContent = `${G.course.name}・PAR ${par}`;
+    $('resKicker').textContent = `${G.course.name}  パー${par}`;
     if (ps.length > 1) { const w = ps.filter(p => p.score === best); $('resTitle').textContent = w.length > 1 ? '引き分け' : `${w[0].name} の勝ち`; }
     else $('resTitle').textContent = scoreName(ps[0].score, par);
     $('resultBox').hidden = false; $('banner').hidden = true;
@@ -1165,7 +1195,7 @@ const App = (() => {
     G.busy = true; showShotStart(s);
     if (G.mode === 'free') {
       const res = simulate(s, G.course, G.course.tee, 0);
-      World.play(res, '#ffe38a', () => { showShotEnd(res); afterFree(res); });
+      World.play(res, '#ffffff', () => { showShotEnd(res); afterFree(res); });
     } else {
       const p = G.players[G.cur];
       const res = simulate(s, G.course, p.pos, G.aim);

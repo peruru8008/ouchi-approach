@@ -4,17 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
-<meta name="theme-color" content="#0b1411">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://d8j0ntlcm91z4.cloudfront.net; media-src 'self' blob: mediastream:; connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="theme-color" content="#173a25">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>おうちアプローチ</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header class="top">
-  <p class="brand"><span class="mark" aria-hidden="true"></span>おうちアプローチ<small>56° WEDGE CHALLENGE</small></p>
+  <p class="brand"><span class="flagmark" aria-hidden="true"></span>おうちアプローチ</p>
   <span class="pill" id="connPill"><i class="dot" id="connDot"></i><span id="connText">未接続</span></span>
   <button class="linkbtn" id="switchRole" hidden>役割を変える</button>
 </header>
@@ -23,21 +22,19 @@
 <main id="roleView" class="narrow stack" hidden>
   <h1 class="title">この端末の役割を選んでください</h1>
   <button class="rolecard" id="pickGreen">
-    <span class="kicker">モニター</span>
     <b>iPad:画面</b>
-    <span>コースと弾道を映すメインの画面です。先にこちらを開きます</span>
+    <span>コースと弾道を映すメインの画面です。先にこちらを開きます。</span>
   </button>
   <button class="rolecard" id="pickCam">
-    <span class="kicker">センサー</span>
     <b>iPhone:カメラ</b>
-    <span>iPadのQRコードを読み取ると、自動でこちらになります</span>
+    <span>iPadのQRコードを読み取ると、自動でこちらになります。</span>
   </button>
   <p class="note">カメラの映像はiPhoneの中だけで処理します。iPadへ送るのは計測した数値だけで、映像は保存も送信もしません。</p>
 </main>
 
 <!-- ============ CAMERA (iPhone) ============ -->
 <main id="camView" class="narrow stack" hidden>
-  <section class="panel stack" id="camPair">
+  <section class="card stack" id="camPair">
     <h2>iPadとつなぐ</h2>
     <p>iPadに出ているQRコードを、iPhoneの<b>カメラアプリ</b>で読み取ってください。自動でつながります。</p>
     <details>
@@ -65,7 +62,7 @@
   </div>
   <p class="note">ボールを置くと自動で認識します。しばらく触らないと画面を暗くして、発熱と電池の消費を抑えます(タップで戻ります)。</p>
 
-  <section class="panel" id="camResult" hidden>
+  <section class="card" id="camResult" hidden>
     <div class="readout three">
       <div><span>球速</span><b id="cSpeed">–</b></div>
       <div><span>打ち出し角</span><b id="cAngle">–</b></div>
@@ -74,10 +71,10 @@
     <p class="note mt" id="cMeta"></p>
   </section>
 
-  <details class="panel">
+  <details class="card">
     <summary>計測の設定</summary>
     <div class="stack mt">
-      <button class="btn" id="retap">自動で認識しないときは:タップで登録</button>
+      <button class="btn" id="retap">自動で認識しないときは、タップで登録</button>
       <div class="field"><label for="sDiam">ボールの直径</label><output id="oDiam"></output><input id="sDiam" type="range" min="30" max="80" step="0.5" value="42.7"></div>
       <div class="field"><label for="sRad">映像上のボールの大きさ補正</label><output id="oRad"></output><input id="sRad" type="range" min="0.6" max="1.6" step="0.02" value="1"></div>
       <div class="field"><label for="sFactor">球速の換算係数(練習ボール → 本物)</label><output id="oFactor"></output><input id="sFactor" type="range" min="0.5" max="1.5" step="0.01" value="1"></div>
@@ -90,55 +87,57 @@
 </main>
 <div class="blackout" id="blackout" hidden>
   <b id="boText">打ってOK</b>
-  <span>省電力中・タップで戻ります</span>
+  <span>省電力中です。タップで戻ります</span>
 </div>
 
 <!-- ============ iPad: HOME ============ -->
 <main id="homeView" class="home" hidden>
-  <section class="hero">
-    <p class="kicker">56° WEDGE CHALLENGE</p>
-    <h1>寄せて、止めて、上がる。</h1>
-    <p class="lead">サンドウェッジ1本で挑む、自宅のアプローチコース。</p>
+  <section class="hero" data-img="hero">
+    <div class="herotext">
+      <h1>おうちアプローチ</h1>
+      <p>サンドウェッジ1本で回る、自宅のアプローチコース。</p>
+    </div>
   </section>
 
-  <section class="guide" aria-label="はじめかた">
-    <div class="gstep" id="gs1"><span class="gn">1</span><div><b>iPhoneをつなぐ</b><span>右のQRコードをiPhoneのカメラアプリで読み取る</span></div><i class="gok" aria-hidden="true"></i></div>
-    <div class="gstep" id="gs2"><span class="gn">2</span><div><b>カメラを置いてボールを置く</b><span>iPhoneで「カメラを開始」→ ボールを置くと自動で認識</span></div><i class="gok" aria-hidden="true"></i></div>
-    <div class="gstep" id="gs3"><span class="gn">3</span><div><b>モードを選んで打つ</b><span>画面に「打ってOK」が出たら打つ</span></div></div>
-  </section>
+  <ol class="checklist" aria-label="はじめかた">
+    <li id="gs1"><i aria-hidden="true"></i><div><b>iPhoneをつなぐ</b><span>右のQRコードを、iPhoneのカメラアプリで読み取ります</span></div></li>
+    <li id="gs2"><i aria-hidden="true"></i><div><b>カメラを置き、ボールを置く</b><span>iPhoneで「カメラを開始」を押すと、ボールを自動で見つけます</span></div></li>
+    <li id="gs3"><i aria-hidden="true"></i><div><b>遊び方を選んで打つ</b><span>画面に「打ってOK」が出たら打ちます</span></div></li>
+  </ol>
 
   <div class="homegrid">
-    <section class="stack minw0">
+    <div class="stack minw0">
       <div class="modes">
-        <button class="modecard free" id="goFree">
-          <span class="tag">1人</span>
-          <b>フリー練習</b>
-          <span>全面グリーンの練習場。5〜45ヤードと60ヤードからピンを選んで、何球でも。</span>
-          <span class="go">練習をはじめる →</span>
+        <button class="modecard" id="goFree">
+          <span class="art" data-img="free"></span>
+          <span class="mbody"><b>フリー練習</b><span>全面グリーンの練習場。5〜45ヤードと60ヤードからピンを選んで、何球でも寄せられます。</span><em>1人</em></span>
         </button>
-        <button class="modecard course" id="goCourse">
-          <span class="tag">1〜2人</span>
-          <b>コース</b>
-          <span>6つのホールから1つ選んで、56度だけで回る。ピンから2m以内に止めたら上がり。</span>
-          <span class="go">コースを選ぶ →</span>
+        <button class="modecard" id="goCourse">
+          <span class="art" data-img="course"></span>
+          <span class="mbody"><b>コース</b><span>6つのホールから1つ選び、56度だけで回ります。ピンから2m以内に止めたら上がり。</span><em>1〜2人</em></span>
         </button>
       </div>
-      <div class="panel stack">
-        <span class="label">上限ヤード(コースで、これ以上飛んだら1打罰)</span>
-        <div class="seg big" role="group" aria-label="上限ヤード" id="limitSeg">
-          <button data-v="25">25ヤード</button><button data-v="35">35ヤード</button><button data-v="45">45ヤード</button>
+      <section class="card settings">
+        <div class="setrow">
+          <div class="minw0">
+            <b class="sethead">上限ヤード</b>
+            <p class="note">コースでこの距離以上転がったら、元の場所から打ち直して1打罰。</p>
+          </div>
+          <div class="seg" role="group" aria-label="上限ヤード" id="limitSeg">
+            <button data-v="25">25</button><button data-v="35">35</button><button data-v="45">45</button>
+          </div>
         </div>
         <p class="note" id="limitNote"></p>
         <label class="switch"><input type="checkbox" id="soundOn"> <span>「打ってOK」になったら音で知らせる</span></label>
-      </div>
-    </section>
+      </section>
+    </div>
 
-    <section class="panel stack connect" id="connectCard">
-      <span class="label">iPhoneとつなぐ</span>
+    <section class="card connect" id="connectCard">
+      <b class="sethead">iPhoneとつなぐ</b>
       <canvas id="qr" width="232" height="232" aria-label="接続用QRコード"></canvas>
-      <div class="paired-mark" aria-hidden="true">✓</div>
+      <div class="paired-mark" aria-hidden="true"></div>
       <p class="note" id="pairNote">iPhoneのカメラアプリでこのQRコードを読み取ってください。</p>
-      <p class="codeline">コード <b class="num" id="codeOut">––––-––––</b></p>
+      <p class="codeline">コード <b id="codeOut">––––-––––</b></p>
       <div class="readyline" id="homeReady" data-state="off"><i></i><span id="homeReadyText">iPhoneのカメラ待ち</span></div>
       <button class="linkbtn" id="newCode">新しいコードにする</button>
     </section>
@@ -147,79 +146,77 @@
 
 <!-- ============ iPad: FREE SETUP ============ -->
 <main id="freeView" class="narrow stack" hidden>
-  <button class="linkbtn left" data-back>← ホームへ</button>
-  <p class="kicker">フリー練習</p>
+  <button class="linkbtn left" data-back>ホームへ戻る</button>
   <h1 class="title">ピンまでの距離を選んでください</h1>
-  <div class="distgrid" id="distGrid"></div>
   <p class="note">選んだ距離にカップを切ります。練習場は全面グリーンです。</p>
+  <div class="distgrid" id="distGrid"></div>
 </main>
 
 <!-- ============ iPad: COURSE SETUP ============ -->
 <main id="courseView" class="stack wide" hidden>
-  <button class="linkbtn left" data-back>← ホームへ</button>
+  <button class="linkbtn left" data-back>ホームへ戻る</button>
   <div class="setuprow">
-    <div class="panel stack">
-      <span class="label">人数</span>
-      <div class="seg big" role="group" aria-label="人数" id="playerSeg"><button data-v="1">1人</button><button data-v="2">2人で対戦</button></div>
+    <div class="card stack">
+      <b class="sethead">人数</b>
+      <div class="seg" role="group" aria-label="人数" id="playerSeg"><button data-v="1">1人</button><button data-v="2">2人で対戦</button></div>
     </div>
-    <div class="panel stack names">
-      <span class="label">名前</span>
+    <div class="card stack">
+      <b class="sethead">名前</b>
       <div class="row">
         <label class="namefield c1"><i></i><input id="name0" maxlength="10" aria-label="プレイヤー1の名前"></label>
         <label class="namefield c2" id="name1wrap"><i></i><input id="name1" maxlength="10" aria-label="プレイヤー2の名前"></label>
       </div>
     </div>
   </div>
-  <p class="kicker">コース</p>
   <h1 class="title">ホールを選んでください</h1>
   <div class="coursegrid" id="courseGrid"></div>
 </main>
 
 <!-- ============ iPad: PLAY ============ -->
 <main id="playView" hidden>
-  <section class="stack minw0">
+  <section class="minw0">
     <div class="world" id="world" data-ready="off">
-      <div class="hud">
-        <div class="hcard" id="hudLeft"><span class="k" id="hTitle">–</span><b id="hMain">–</b><span class="s" id="hExtra"></span></div>
-        <div class="hcard right" id="hudRight"><span class="k" id="hTurn">–</span><b id="hSub">–</b><span class="s" id="hLie"></span></div>
-      </div>
-      <div class="ready" id="readyMark" data-state="off"><i aria-hidden="true"></i><span id="readyText">カメラ待ち</span></div>
+      <div class="teesign" id="hudLeft"><span class="par" id="hTitle">–</span><b id="hMain">–</b><span class="s" id="hExtra"></span></div>
+      <div class="playercard" id="hudRight"><span class="k" id="hTurn">–</span><b id="hSub">–</b><span class="s" id="hLie"></span></div>
       <div class="banner" id="banner" hidden></div>
       <canvas class="profile" id="profile" width="360" height="150" aria-label="弾道の横から図"></canvas>
       <div class="aimbar" id="aimBar" role="group" aria-label="狙いの方向">
-        <button id="aimL" aria-label="狙いを左へ">◀</button>
+        <span class="aimlabel">狙い</span>
+        <div><button id="aimL" aria-label="狙いを左へ">◀</button><button id="aimR" aria-label="狙いを右へ">▶</button></div>
         <button id="aimPin">ピン</button>
         <button id="aimRoute" hidden>ルート</button>
-        <button id="aimR" aria-label="狙いを右へ">▶</button>
       </div>
       <div class="viewbtns" role="group" aria-label="視点">
         <button id="vFollow" aria-pressed="true">後方</button>
         <button id="vTop" aria-pressed="false">真上</button>
       </div>
-      <div class="statbar">
+      <div class="ready" id="readyMark" data-state="off"><i aria-hidden="true"></i><span id="readyText">カメラ待ち</span></div>
+      <div class="board">
         <div><span>球速</span><b id="gSpeed">–</b><em>m/s</em></div>
-        <div><span>打ち出し角</span><b id="gAngle">–</b><em>°</em></div>
+        <div><span>打ち出し角</span><b id="gAngle">–</b><em>度</em></div>
         <div><span>スピン</span><b id="gSpin">–</b><em>rpm</em></div>
         <div><span>キャリー</span><b id="gCarry">–</b><em>yd</em></div>
         <div><span>総距離</span><b id="gTotal">–</b><em>yd</em></div>
         <div class="hi"><span>ピンまで</span><b id="gPin">–</b><em id="gPinU"></em></div>
       </div>
       <div class="result" id="resultBox" hidden>
-        <p class="kicker" id="resKicker">HOLE OUT</p>
-        <h2 id="resTitle">ホールアウト</h2>
-        <table class="restable" id="resTable"></table>
-        <div class="row">
-          <button class="btn primary" id="resAgain">もう一度</button>
-          <button class="btn" id="resCourse">ほかのホール</button>
-          <button class="btn" id="resHome">ホームへ</button>
+        <div class="resultcard">
+          <p class="reskicker" id="resKicker"></p>
+          <h2 id="resTitle">ホールアウト</h2>
+          <table class="restable" id="resTable"></table>
+          <div class="row">
+            <button class="btn primary" id="resAgain">もう一度</button>
+            <button class="btn" id="resCourse">ほかのホール</button>
+            <button class="btn" id="resHome">ホームへ</button>
+          </div>
         </div>
       </div>
     </div>
   </section>
 
   <aside class="stack minw0 side">
-    <section class="panel stack" id="sideFree">
-      <span class="label">練習の記録</span>
+    <section class="card stack" id="sideFree">
+      <b class="sethead">練習の記録</b>
       <div class="stats">
         <div><span>球数</span><b id="fsN">0</b></div>
         <div><span>2m以内</span><b id="fsOk">–</b></div>
@@ -229,12 +226,12 @@
       <div class="logwrap"><table class="log" id="freeLog"></table></div>
       <button class="btn" id="changeDist">距離を変える</button>
     </section>
-    <section class="panel stack" id="sideCourse">
-      <span class="label" id="scTitle">スコア</span>
+    <section class="card stack" id="sideCourse">
+      <b class="sethead" id="scTitle">スコア</b>
       <div class="players" id="scPlayers"></div>
       <div class="logwrap"><table class="log" id="courseLog"></table></div>
     </section>
-    <details class="panel">
+    <details class="card">
       <summary>カメラなしで試し打ち</summary>
       <div class="stack mt">
         <div class="field"><label for="tSpeed">球速</label><output id="otSpeed"></output><input id="tSpeed" type="range" min="4" max="30" step="0.5" value="13"></div>
@@ -243,7 +240,7 @@
         <button class="btn primary" id="testShot">この条件で打つ</button>
       </div>
     </details>
-    <button class="btn ghost" id="quitPlay">やめてホームへ</button>
+    <button class="btn quiet" id="quitPlay">やめてホームへ</button>
   </aside>
 </main>
 
