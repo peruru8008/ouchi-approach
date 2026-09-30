@@ -1,5 +1,5 @@
 'use strict';
-/* おうちアプローチ — 56度で寄せる、自宅のアプローチ場
+/* おうちアプローチ — 56° WEDGE CHALLENGE
    セキュリティ方針:
    - カメラ映像はiPhoneの中だけで処理し、保存も送信もしない
    - 端末間で送るのは数値と状態だけ(WebRTCで暗号化された直接通信。データを中継するサーバーは使わない)
@@ -114,28 +114,51 @@ const COURSES = (() => {
   const unitYd = (limitYd) => Math.round(limitYd * 32 / 35); // 35yd limit -> 32yd
   const E = (type, cx, cz, rx, rz, extra) => Object.assign({ type, kind: 'ellipse', cx, cz, rx, rz }, extra || {});
   const Rc = (type, x0, x1, z0, z1, extra) => Object.assign({ type, kind: 'rect', x0, x1, z0, z1 }, extra || {});
+  // 曲がったフェアウェイ:中心線の点列と半幅から多角形を作る
+  function corridor(type, pts, hw, extra) {
+    const L = [], R = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+      let dx = b[0] - a[0], dz = b[1] - a[1]; const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
+      L.push([pts[i][0] + dz * hw, pts[i][1] - dx * hw]); R.push([pts[i][0] - dz * hw, pts[i][1] + dx * hw]);
+    }
+    // 両端を少し丸める
+    const s = pts[0], e = pts[pts.length - 1];
+    const cap = (p, a, b, back) => { const out = []; for (let k = 1; k < 6; k++) { const t = k / 6 * Math.PI; const mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2; const rx = a[0] - mx, rz = a[1] - mz; const c = Math.cos(t), sn = Math.sin(t); out.push([mx + rx * c + back[0] * sn * hw * 0.6, mz + rz * c + back[1] * sn * hw * 0.6]); } return out; };
+    const d0 = [pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]], l0 = Math.hypot(d0[0], d0[1]) || 1;
+    const n = pts.length, d1 = [pts[n - 1][0] - pts[n - 2][0], pts[n - 1][1] - pts[n - 2][1]], l1 = Math.hypot(d1[0], d1[1]) || 1;
+    const poly = [...L, ...cap(e, L[n - 1], R[n - 1], [d1[0] / l1, d1[1] / l1]), ...R.reverse(), ...cap(s, R[R.length - 1], L[0], [d0[0] / l0, d0[1] / l0])];
+    return Object.assign({ type, kind: 'poly', pts: poly }, extra || {});
+  }
   const defs = [
-    { id: 'p3s', par: 2, style: 'シンプル', name: 'ファーストステップ', desc: '広いグリーンへまっすぐ寄せる、基本のパー2。',
-      build: (f) => ({ pin: { x: f, z: 0.5 }, stimp: 9.5, slope: { x: -0.012, z: 0.004 }, route: [],
-        shapes: [E('green', f + 1, 0.5, 7.5, 6.5), Rc('fairway', -3, f - 5, -6, 6)] }) },
-    { id: 'p3t', par: 2, style: 'テクニカル', name: '浮島グリーン', desc: '池に浮かぶ小さなグリーン。届かなくても、越えすぎても池。',
+    { id: 'p2s', par: 2, style: 'シンプル', name: 'ファーストステップ', desc: '右に少し振ったグリーン。手前左のラフに気をつけて、まずは基本の1打。',
+      build: (f) => ({ pin: { x: f, z: 2.5 }, stimp: 9.5, slope: { x: -0.012, z: -0.006 }, route: [],
+        shapes: [E('green', f + 1, 2, 8, 7), corridor('fairway', [[-3, 0], [0.5 * f, 0.5], [f - 6, 2]], 10),
+          E('rough', 0.6 * f, -7.5, 4.5, 3, { top: true }), E('rough', 0.8 * f, 9, 4, 2.6, { top: true })] }) },
+    { id: 'p2t', par: 2, style: 'テクニカル', name: '浮島グリーン', desc: '池に浮かぶ小さなグリーン。届かなくても、越えすぎても池。',
       build: (f) => ({ pin: { x: f, z: -0.8 }, stimp: 11, slope: { x: 0.006, z: -0.01 }, route: [],
-        shapes: [E('green', f, -0.5, 5.5, 4.8), E('water', f, -0.5, 11, 10), Rc('fairway', -3, f - 12, -6, 6)] }) },
-    { id: 'p4s', par: 3, style: 'シンプル', name: 'まっすぐロード', desc: '真っすぐなフェアウェイ。刻んで確実に寄せる。',
-      build: (f) => ({ pin: { x: 2 * f, z: -0.5 }, stimp: 10, slope: { x: -0.015, z: -0.006 }, route: [],
-        shapes: [E('green', 2 * f + 1, 0, 8, 7), Rc('fairway', -3, 2 * f - 5, -7, 7)] }) },
-    { id: 'p4t', par: 3, style: 'テクニカル', name: '崖越えショートカット', desc: '右に曲がるドッグレッグ。崖を越えれば近道、落ちたら1打罰。',
-      build: (f) => ({ pin: { x: f, z: f + 0.5 }, stimp: 10.5, slope: { x: 0.008, z: -0.012 }, route: [{ x: f, z: 0 }],
-        shapes: [E('green', f, f + 0.5, 7, 7), Rc('fairway', -3, f + 6, -6, 6), Rc('fairway', f - 6, f + 6, -6, f - 6),
-          Rc('chasm', 0.3 * f, 0.65 * f, Math.max(6.5, 0.3 * f), 0.7 * f)] }) },
-    { id: 'p5s', par: 4, style: 'シンプル', name: 'ゆったり湖畔', desc: '右手に湖が見える長いホール。3打でリズムよく。',
-      build: (f) => ({ pin: { x: 3 * f, z: 0 }, stimp: 10, slope: { x: -0.01, z: 0.008 }, route: [],
-        shapes: [E('green', 3 * f + 1, 0, 8, 7), Rc('fairway', -3, 3 * f - 6, -8, 8), E('water', 1.6 * f, 16, 12, 5)] }) },
-    { id: 'p5t', par: 4, style: 'テクニカル', name: 'アイランドチェイン', desc: '島から島へ渡っていく。左の陸地を回れば安全だが遠回り。',
+        shapes: [E('green', f, -0.5, 6, 5.2), E('water', f, -0.5, 12.5, 11.5), corridor('fairway', [[-3, 0], [0.4 * f, 0], [f - 13.5, -0.5]], 9),
+          E('rough', 0.3 * f, 7, 4, 2.6, { top: true })] }) },
+    { id: 'p3s', par: 3, style: 'シンプル', name: 'リバーサイド', desc: 'ゆるやかに左へ曲がるホール。曲がり角の外側のラフは避けたい。',
+      build: (f) => ({ pin: { x: 1.85 * f, z: -0.55 * f }, stimp: 10, slope: { x: -0.012, z: 0.008 }, route: [{ x: 1.0 * f, z: 0 }],
+        shapes: [E('green', 1.85 * f + 1, -0.55 * f, 8, 7), corridor('fairway', [[-3, 0], [0.9 * f, 0], [1.3 * f, -0.2 * f], [1.72 * f, -0.5 * f]], 9),
+          E('rough', 1.12 * f, 0.26 * f, 5, 3.5, { top: true }), E('rough', 0.45 * f, -8.5, 4, 2.4, { top: true })] }) },
+    { id: 'p3t', par: 3, style: 'テクニカル', name: '崖越えアイランド', desc: '右ドッグレッグ。崖の真ん中の浮島に止められれば近道、落ちたら1打罰。',
+      build: (f) => ({ pin: { x: f, z: f + 0.5 }, stimp: 10.5, slope: { x: 0.008, z: -0.012 }, route: [{ x: 0.47 * f, z: 0.53 * f }, { x: f, z: 0 }],
+        shapes: [E('green', f, f + 0.5, 7, 7), corridor('fairway', [[-3, 0], [f, 0], [f, f - 6]], 8),
+          E('fairway', 0.47 * f, 0.53 * f, 0.13 * f, 0.11 * f, { top: true, island: true }),
+          Rc('chasm', 0.25 * f, f - 9.5, Math.max(9.5, 0.32 * f), 0.76 * f),
+          E('rough', f + 9, 0.35 * f, 3, 5, { top: true })] }) },
+    { id: 'p4s', par: 4, style: 'シンプル', name: 'ゆったり湖畔', desc: 'S字にうねるフェアウェイ。左の湖を眺めながら、3打でリズムよく。',
+      build: (f) => ({ pin: { x: 3 * f, z: 0.3 }, stimp: 10, slope: { x: -0.01, z: 0.008 }, route: [{ x: 0.85 * f, z: 0 }, { x: 1.8 * f, z: 0.35 * f }],
+        shapes: [E('green', 3 * f + 1, 0, 8, 7), corridor('fairway', [[-3, 0], [0.8 * f, 0], [1.4 * f, 0.35 * f], [2.2 * f, 0.35 * f], [2.75 * f, 0.05 * f]], 9),
+          E('water', 1.55 * f, -0.36 * f, 0.32 * f, 0.14 * f), E('rough', 2.0 * f, 0.58 * f, 5, 3, { top: true }), E('rough', 1.15 * f, 0.1 * f, 4, 2.5, { top: true })] }) },
+    { id: 'p4t', par: 4, style: 'テクニカル', name: 'アイランドチェイン', desc: '島から島へ渡っていく。左の陸地を回れば安全だが遠回り。',
       build: (f) => ({ pin: { x: 3 * f, z: 0.4 }, stimp: 11, slope: { x: 0.004, z: 0.01 }, route: [{ x: 1.0 * f, z: 0 }, { x: 2.0 * f, z: 0.1 * f }],
-        shapes: [E('green', 3 * f, 0, 6.5, 5.5),
-          E('fairway', 1.0 * f, 0, 0.28 * f, 0.22 * f, { top: true }), E('fairway', 2.0 * f, 0.1 * f, 0.28 * f, 0.22 * f, { top: true }),
-          Rc('water', 0.4 * f, 3 * f + 12, -0.5 * f, 0.5 * f), Rc('fairway', -3, 0.4 * f, -6, 6)] }) }
+        shapes: [E('green', 3 * f, 0, 7, 6),
+          E('fairway', 1.0 * f, 0, 0.3 * f, 0.24 * f, { top: true }), E('fairway', 2.0 * f, 0.1 * f, 0.3 * f, 0.24 * f, { top: true }),
+          Rc('water', 0.4 * f, 3 * f + 13, -0.55 * f, 0.55 * f), corridor('fairway', [[-3, 0], [0.4 * f - 1, 0]], 8),
+          Rc('fairway', 0.4 * f, 3 * f + 6, -0.55 * f - 9, -0.55 * f - 1)] }) }
   ];
   function make(id, limitYd) {
     const d = defs.find(x => x.id === id);
@@ -183,12 +206,24 @@ $('pickCam').onclick = () => startRole('camera');
 $('pickGreen').onclick = () => startRole('green');
 $('switchRole').onclick = () => { store.set('role', null); location.reload(); };
 
-/* ---------------- screen wake lock (iPad) ---------------- */
+/* ---------------- screen wake lock ---------------- */
 const Power = (() => {
   let lock = null, want = false;
   async function keepAwake() { want = true; try { if ('wakeLock' in navigator && !lock) { lock = await navigator.wakeLock.request('screen'); lock.addEventListener('release', () => { lock = null; }); } } catch (e) { lock = null; } }
   document.addEventListener('visibilitychange', () => { if (!document.hidden && want) keepAwake(); });
   return { keepAwake };
+})();
+
+/* ---------------- sound (iPad) ---------------- */
+const Sound = (() => {
+  let ctx = null;
+  const on = () => store.get('sound', true);
+  document.addEventListener('pointerdown', () => { try { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume(); } catch (e) {} }, true);
+  function tone(freq, t0, dur, vol) { const o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'sine'; o.frequency.value = freq; g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur); o.connect(g).connect(ctx.destination); o.start(t0); o.stop(t0 + dur + 0.05); }
+  function ready() { if (!on() || !ctx) return; try { const t = ctx.currentTime; tone(880, t, 0.25, 0.18); tone(1318, t + 0.12, 0.35, 0.16); } catch (e) {} }
+  function good() { if (!on() || !ctx) return; try { const t = ctx.currentTime; [784, 988, 1175, 1568].forEach((f, i) => tone(f, t + i * 0.09, 0.3, 0.12)); } catch (e) {} }
+  function bad() { if (!on() || !ctx) return; try { const t = ctx.currentTime; tone(330, t, 0.3, 0.14); tone(262, t + 0.18, 0.4, 0.14); } catch (e) {} }
+  return { ready, good, bad, on };
 })();
 
 /* ---------------- network (PeerJS / WebRTC) ---------------- */
@@ -210,7 +245,7 @@ const Net = (() => {
   }
   function drawQR(text) {
     const cv = $('qr'), ctx = cv.getContext('2d');
-    const size = Math.round(232 * Math.min(3, devicePixelRatio || 1)); cv.width = cv.height = size;
+    const size = Math.round(212 * Math.min(3, devicePixelRatio || 1)); cv.width = cv.height = size;
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
     if (!window.qrcode) return;
     const q = qrcode(0, 'M'); q.addData(text); q.make();
@@ -220,7 +255,7 @@ const Net = (() => {
   }
   function destroy() { if (peer) { try { peer.destroy(); } catch (e) {} } peer = null; conn = null; }
 
-  /* ---- iPad: waits for one iPhone ---- */
+  /* ---- iPad ---- */
   function host(fresh) {
     if (peer && !fresh) return;
     destroy();
@@ -233,7 +268,7 @@ const Net = (() => {
     if (!window.Peer) { setConn('off', '通信ライブラリを読み込めません'); return; }
     hostTries = 0; openHost();
   }
-  function unpaired() { $('connectCard').classList.remove('paired'); $('pairNote').textContent = 'iPhoneのカメラアプリでこのQRコードを読み取ってください。'; setConn('wait', 'iPhoneを待っています'); }
+  function unpaired() { $('connectCard').classList.remove('paired'); $('pairNote').textContent = 'iPhoneのカメラアプリでこのQRコードを読み取ってください。'; setConn('wait', 'iPhoneを待っています'); App.setPaired(false); }
   function openHost() {
     if (peer) { try { peer.destroy(); } catch (e) {} }
     peer = new Peer(PREFIX + code.toLowerCase(), PEER_OPTS);
@@ -249,7 +284,7 @@ const Net = (() => {
       conn = c;
       c.on('open', () => {
         setConn('on', 'iPhoneと接続中'); $('connectCard').classList.add('paired'); $('pairNote').textContent = 'iPhoneとつながっています。';
-        toast('iPhoneとつながりました'); App.sendInfo();
+        toast('iPhoneとつながりました'); App.setPaired(true); App.sendInfo();
       });
       c.on('data', (d) => { const m = safeParse(d); if (m) App.onMessage(m); });
       c.on('close', () => { if (conn === c) { conn = null; unpaired(); App.setReady('off'); } });
@@ -288,29 +323,30 @@ const Net = (() => {
 })();
 
 /* ======================================================================
-   CAMERA (iPhone): live ball detection
+   CAMERA (iPhone): automatic ball recognition + launch measurement
    ====================================================================== */
 const Cam = (() => {
   const vid = $('vid'), ov = $('overlay'), octx = ov.getContext('2d');
   const proc = document.createElement('canvas'); const pctx = proc.getContext('2d', { willReadFrequently: true });
-  const PW = 320; let PH = 180;
+  const PW = 480; let PH = 270;
   let stream = null, wake = null, running = false, frameN = 0;
-  let model = store.get('ballModel', null); // {nx,ny,nr,color}
   let state = 'off', lastSent = '', prev = null, info = { next: '', lie: '' };
-  let rest = null, stable = 0, lastPos = null, readyFrac = 0, low = 0;
-  let pts = [], trackStart = 0, lost = 0, cooldownUntil = 0, lastTrack = null, needTap = false;
+  let ball = null;           // 認識したボール {x, y, r, color}
+  let cand = null, stable = 0, readyFrac = 0, low = 0, needTap = false, candBox = null;
+  let pts = [], trackStart = 0, lost = 0, cooldownUntil = 0, lastTrack = null;
   let lastTouch = Date.now(), lastActive = Date.now(), dark = false;
+  const learned = store.get('ballColor', null); // 前回のボールの色(優先して探す)
+  let learnedColor = learned;
   const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000;
-  const ftimes = [];
   const S = { diam: store.get('diam', 42.7), rad: 1, factor: store.get('factor', 1), angOff: store.get('angOff', 0), spin: store.get('spin', 1), sens: store.get('sens', 1) };
   [['sDiam','oDiam','diam',v=>v.toFixed(1)+' mm'],['sRad','oRad','rad',v=>'×'+v.toFixed(2)],['sFactor','oFactor','factor',v=>'×'+v.toFixed(2)],
    ['sAngOff','oAngOff','angOff',v=>(v>0?'+':'')+v.toFixed(1)+'°'],['sSpin','oSpin','spin',v=>'×'+v.toFixed(2)],['sSens','oSens','sens',v=>'×'+v.toFixed(2)]]
   .forEach(([s,o,k,f]) => { const e=$(s); e.value=S[k]; $(o).textContent=f(+e.value); e.oninput=()=>{ S[k]=+e.value; $(o).textContent=f(+e.value); if(k!=='rad') store.set(k,+e.value); }; });
 
   const TEXT = {
-    off: ['カメラを開始してください', '三脚のiPhoneを横向きにして、ボールを挟んで自分と向かい合う位置(1〜1.5m)に置きます'],
-    tap: ['ボールをタップして登録', 'ボールを置いて、映像の中のボールを1回タップしてください'],
-    wait: ['ボールを置いてください', '登録した位置のまわりに置くと自動で認識します'],
+    off: ['カメラを開始してください', '三脚のiPhoneを横向きにして、ボールを挟んで自分と向かい合う位置(約1m)に置きます'],
+    search: ['ボールを置いてください', 'ボールが止まると自動で認識します'],
+    tap: ['ボールをタップして登録', '映像の中の、止まっているボールを1回タップしてください'],
     ready: ['打ってOK', ''],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
@@ -322,27 +358,26 @@ const Cam = (() => {
     const t = TEXT[s] || ['', ''];
     $('camStatus').dataset.state = s;
     $('stateText').textContent = t[0];
-    $('stateSub').textContent = sub || ((s === 'ready' || s === 'wait') && infoLine()) || t[1];
+    $('stateSub').textContent = sub || ((s === 'ready' || s === 'search') && infoLine()) || t[1];
     $('boText').textContent = t[0];
     pushStatus();
   }
   function pushStatus(force) {
-    const st = state === 'tap' || state === 'error' || state === 'done' ? 'wait' : state;
+    const st = state === 'ready' ? 'ready' : state === 'track' ? 'track' : state === 'off' ? 'off' : 'wait';
     if (!force && st === lastSent) return;
     lastSent = st; Net.send({ type: 'status', state: st });
   }
   function onInfo(m) {
     info.next = typeof m.next === 'string' ? m.next.slice(0, 16) : '';
     info.lie = m.lie === 'マット' || m.lie === '絨毯' ? m.lie : '';
-    if (state === 'ready' || state === 'wait') setState(state);
+    if (state === 'ready' || state === 'search') setState(state);
   }
-  function setButtons() { $('camStart').hidden = running; $('camStop').hidden = !running; $('retap').hidden = !running; }
+  function setButtons() { $('camStart').hidden = running; $('camStop').hidden = !running; }
 
   async function start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('このブラウザではカメラを使えません(Safariで開いてください)'); return; }
     try {
-      // 解像度を抑えて発熱を減らす(計測は320px幅で行うため十分)
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 60, max: 60 } } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60, max: 60 } } });
     } catch (e) { setState('error', 'カメラの使用が許可されませんでした。設定 → Safari → カメラ を確認してください'); return; }
     vid.srcObject = stream;
     try { await vid.play(); } catch (e) {}
@@ -352,7 +387,7 @@ const Cam = (() => {
     $('stageEmpty').hidden = true;
     try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) { wake = null; }
     running = true; prev = null; lastTouch = lastActive = Date.now(); setButtons();
-    if (!model) { needTap = true; setState('tap'); } else resetToWait();
+    toSearch();
     loop();
   }
   function stop(msg) {
@@ -369,7 +404,7 @@ const Cam = (() => {
   document.addEventListener('visibilitychange', () => { if (document.hidden && running) stop('画面を離れたのでカメラを止めました。「カメラを開始」で再開します'); });
   window.addEventListener('pagehide', () => { if (running) stop(); });
 
-  // 省電力: しばらく触らなければ画面を暗く、長時間打たなければカメラを休止
+  // 省電力
   function setDark(on) { dark = on; $('blackout').hidden = !on; }
   document.addEventListener('pointerdown', () => { lastTouch = lastActive = Date.now(); if (dark) setDark(false); }, true);
   setInterval(() => {
@@ -383,21 +418,68 @@ const Cam = (() => {
   function grab() { pctx.drawImage(vid, 0, 0, PW, PH); return pctx.getImageData(0, 0, PW, PH).data; }
   const cdist = (d, i, c) => Math.abs(d[i] - c[0]) + Math.abs(d[i + 1] - c[1]) + Math.abs(d[i + 2] - c[2]);
 
-  function measureBallAt(d, px, py) {
+  /* ---- 自動認識:明るい・鮮やかな色の、丸い、止まっている塊を探す(内側の黒い点は加点) ---- */
+  const cls = new Uint8Array(480 * 480), vis = new Uint8Array(480 * 480), qbuf = new Int32Array(480 * 480);
+  function findAuto(d) {
+    const N = PW * PH;
+    for (let i = 0, p = 0; i < N; i++, p += 4) {
+      const r = d[p], g = d[p + 1], b = d[p + 2];
+      const mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+      cls[i] = (mx > 135 && (mx - mn > 60 || mn > 180)) ? 1 : (mx < 80 ? 2 : 0);
+    }
+    vis.fill(0, 0, N);
+    const minA = 12, maxA = N * 0.015; let best = null;
+    const y0 = Math.floor(PH * 0.12);
+    for (let s = y0 * PW; s < N; s++) {
+      if (cls[s] !== 1 || vis[s]) continue;
+      let head = 0, tail = 0; qbuf[tail++] = s; vis[s] = 1;
+      let n = 0, sx = 0, sy = 0, sr = 0, sg = 0, sb = 0, mnx = PW, mxx = 0, mny = PH, mxy = 0, big = false;
+      while (head < tail) {
+        const k = qbuf[head++]; const x = k % PW, y = (k / PW) | 0; n++; sx += x; sy += y;
+        const p = k * 4; sr += d[p]; sg += d[p + 1]; sb += d[p + 2];
+        if (x < mnx) mnx = x; if (x > mxx) mxx = x; if (y < mny) mny = y; if (y > mxy) mxy = y;
+        if (n > maxA) { big = true; }
+        if (x > 0 && cls[k - 1] === 1 && !vis[k - 1]) { vis[k - 1] = 1; qbuf[tail++] = k - 1; }
+        if (x < PW - 1 && cls[k + 1] === 1 && !vis[k + 1]) { vis[k + 1] = 1; qbuf[tail++] = k + 1; }
+        if (y > 0 && cls[k - PW] === 1 && !vis[k - PW]) { vis[k - PW] = 1; qbuf[tail++] = k - PW; }
+        if (y < PH - 1 && cls[k + PW] === 1 && !vis[k + PW]) { vis[k + PW] = 1; qbuf[tail++] = k + PW; }
+      }
+      if (big || n < minA) continue;
+      const w = mxx - mnx + 1, h = mxy - mny + 1;
+      if (w / h > 1.5 || h / w > 1.5 || mnx === 0 || mny === 0 || mxx === PW - 1 || mxy === PH - 1) continue;
+      const fill = n / (w * h); if (fill < 0.42 || fill > 0.95) continue;
+      const cx = sx / n, cy = sy / n, r = (w + h) / 4;
+      // 内側の黒い点
+      let dk = 0, tot = 0;
+      for (let yy = Math.floor(cy - r); yy <= cy + r; yy++) for (let xx = Math.floor(cx - r); xx <= cx + r; xx++) {
+        if (xx < 0 || yy < 0 || xx >= PW || yy >= PH || Math.hypot(xx - cx, yy - cy) > r * 0.85) continue;
+        tot++; if (cls[yy * PW + xx] === 2) dk++;
+      }
+      const dots = tot ? dk / tot : 0;
+      const color = [sr / n, sg / n, sb / n];
+      let score = 1.2 - Math.abs(fill - 0.72) * 2 + (dots > 0.01 && dots < 0.35 ? 0.8 : 0) + (cy / PH) * 0.3;
+      if (learnedColor) score += Math.max(0, 0.8 - cdist([...color, 0], 0, learnedColor) / 120);
+      if (!best || score > best.score) best = { x: cx, y: cy, r: Math.max(2, Math.sqrt(n / Math.PI) * 1.04), color, score, box: [mnx, mny, w, h] };
+    }
+    return best;
+  }
+  function toSearch() { ball = null; cand = null; stable = 0; low = 0; pts = []; lost = 0; if (running) setState(needTap ? 'tap' : 'search'); }
+
+  // 予備:タップで登録
+  function measureAt(d, px, py) {
     px = Math.round(px); py = Math.round(py);
     let c = [0, 0, 0], n = 0;
     for (let y = py - 1; y <= py + 1; y++) for (let x = px - 1; x <= px + 1; x++) { if (x < 0 || y < 0 || x >= PW || y >= PH) continue; const i = (y * PW + x) * 4; c[0] += d[i]; c[1] += d[i + 1]; c[2] += d[i + 2]; n++; }
     c = c.map(v => v / Math.max(1, n));
-    const seen = new Uint8Array(PW * PH), q = [py * PW + px]; seen[q[0]] = 1; let area = 0;
-    while (q.length && area < 4000) {
-      const k = q.pop(); const x = k % PW, y = (k / PW) | 0; area++;
+    const seen = new Uint8Array(PW * PH), q = [py * PW + px]; seen[q[0]] = 1; let area = 0, sx = 0, sy = 0;
+    while (q.length && area < 6000) {
+      const k = q.pop(); const x = k % PW, y = (k / PW) | 0; area++; sx += x; sy += y;
       for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-        const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= PW || ny >= PH || Math.hypot(nx - px, ny - py) > 40) continue;
+        const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= PW || ny >= PH || Math.hypot(nx - px, ny - py) > 50) continue;
         const kk = ny * PW + nx; if (seen[kk]) continue; seen[kk] = 1; if (cdist(d, kk * 4, c) < 70) q.push(kk);
       }
     }
-    // 黒い点の分を補うため、少し大きめに見積もる
-    return { color: c, r: clamp(Math.sqrt(area / Math.PI) * 1.05, 2, 30) };
+    return { x: sx / area, y: sy / area, r: clamp(Math.sqrt(area / Math.PI) * 1.05, 2, 40), color: c };
   }
   function videoBox() {
     const W = ov.width, H = ov.height, va = (vid.videoWidth || 16) / (vid.videoHeight || 9), ca = W / H;
@@ -409,70 +491,56 @@ const Cam = (() => {
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    const m = measureBallAt(grab(), nx * PW, ny * PH);
-    model = { nx, ny, nr: m.r / PW, color: m.color }; store.set('ballModel', model);
-    needTap = false; resetToWait(); toast('ボールを登録しました');
+    const d = grab(), m = measureAt(d, nx * PW, ny * PH);
+    learnedColor = m.color; store.set('ballColor', m.color);
+    needTap = false; becomeReady(d, m); toast('ボールを登録しました');
   });
-  $('retap').onclick = () => { model = null; store.set('ballModel', null); needTap = true; if (running) setState('tap'); };
-  function resetToWait() { rest = null; stable = 0; lastPos = null; low = 0; pts = []; lost = 0; if (running && model) setState('wait'); }
+  $('retap').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } needTap = true; setDark(false); toSearch(); document.getElementById('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
 
-  function params() {
-    const br = Math.max(2, model.nr * PW * S.rad);
-    return { br, area: Math.PI * br * br, CT: 75 * S.sens, DT: 28 / S.sens, zx: model.nx * PW, zy: model.ny * PH, zR: Math.max(8 * br, 36) };
-  }
-  function findBall(d, P) {
-    const x0 = Math.max(0, Math.floor(P.zx - P.zR)), x1 = Math.min(PW - 1, Math.ceil(P.zx + P.zR));
-    const y0 = Math.max(0, Math.floor(P.zy - P.zR)), y1 = Math.min(PH - 1, Math.ceil(P.zy + P.zR));
-    const vis = new Uint8Array(PW * PH); let best = null;
-    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-      const k = y * PW + x; if (vis[k]) continue; vis[k] = 1;
-      if (cdist(d, k * 4, model.color) >= P.CT) continue;
-      const q = [k]; let n = 0, sx = 0, sy = 0, mnx = x, mxx = x, mny = y, mxy = y;
-      while (q.length) {
-        const kk = q.pop(); const xx = kk % PW, yy = (kk / PW) | 0; n++; sx += xx; sy += yy;
-        if (xx < mnx) mnx = xx; if (xx > mxx) mxx = xx; if (yy < mny) mny = yy; if (yy > mxy) mxy = yy;
-        for (const o of [1, -1, PW, -PW]) { const nk = kk + o; if (nk < 0 || nk >= vis.length || vis[nk]) continue; const nx = nk % PW, ny = (nk / PW) | 0; if (nx < x0 || nx > x1 || ny < y0 || ny > y1) continue; vis[nk] = 1; if (cdist(d, nk * 4, model.color) < P.CT) q.push(nk); }
-      }
-      if (n < P.area * 0.3 || n > P.area * 2.8) continue;
-      const bw = mxx - mnx + 1, bh = mxy - mny + 1; if (bw / bh > 2 || bh / bw > 2) continue;
-      const cx = sx / n, cy = sy / n, dist = Math.hypot(cx - P.zx, cy - P.zy);
-      if (!best || dist < best.dist) best = { x: cx, y: cy, n, dist };
-    }
-    return best;
-  }
-  function fracAt(d, P, x, y) {
-    let hit = 0, n = 0; const R = Math.max(1.5, P.br * 0.8);
+  function params() { const br = Math.max(2, ball.r * S.rad); return { br, area: Math.PI * br * br, CT: 80 * S.sens, DT: 26 / S.sens }; }
+  function fracAt(d, x, y, r) {
+    let hit = 0, n = 0; const R = Math.max(1.5, r * 0.8);
     for (let yy = Math.floor(y - R); yy <= y + R; yy++) for (let xx = Math.floor(x - R); xx <= x + R; xx++) {
       if (xx < 0 || yy < 0 || xx >= PW || yy >= PH || Math.hypot(xx - x, yy - y) > R) continue;
-      n++; if (cdist(d, (yy * PW + xx) * 4, model.color) < P.CT) hit++;
+      n++; if (cdist(d, (yy * PW + xx) * 4, ball.color) < 80 * S.sens) hit++;
     }
     return n ? hit / n : 0;
   }
+  function becomeReady(d, b) {
+    ball = { x: b.x, y: b.y, r: b.r, color: b.color };
+    readyFrac = Math.max(0.2, fracAt(d, ball.x, ball.y, ball.r)); low = 0;
+    setState('ready');
+  }
   function trackStep(d, t, P) {
     let pred, wx0, wx1, wy0, wy1;
-    if (!pts.length) { pred = [rest.x, rest.y]; wx0 = rest.x - 14 * P.br; wx1 = rest.x + 14 * P.br; wy0 = rest.y - 14 * P.br; wy1 = rest.y + 1.5 * P.br; }
+    if (!pts.length) { pred = [ball.x, ball.y]; wx0 = ball.x - 16 * P.br; wx1 = ball.x + 16 * P.br; wy0 = ball.y - 16 * P.br; wy1 = ball.y + 1.5 * P.br; }
     else {
       const L = pts[pts.length - 1]; let vx = 0, vy = 0;
       if (pts.length >= 2) { const Q = pts[pts.length - 2]; const dt = (L.t - Q.t) || 1 / 60; vx = (L.x - Q.x) / dt; vy = (L.y - Q.y) / dt; }
       const dtn = t - L.t; pred = [L.x + vx * dtn, L.y + vy * dtn];
       const rad = Math.max(6 * P.br, 1.8 * Math.hypot(vx, vy) * dtn);
-      wx0 = pred[0] - rad; wx1 = pred[0] + rad; wy0 = pred[1] - rad; wy1 = Math.min(pred[1] + rad, rest.y + 1.5 * P.br);
+      wx0 = pred[0] - rad; wx1 = pred[0] + rad; wy0 = pred[1] - rad; wy1 = Math.min(pred[1] + rad, ball.y + 1.5 * P.br);
     }
     wx0 = Math.max(0, Math.floor(wx0)); wx1 = Math.min(PW - 1, Math.ceil(wx1)); wy0 = Math.max(0, Math.floor(wy0)); wy1 = Math.min(PH - 1, Math.ceil(wy1));
-    const mask = new Uint8Array(PW * PH);
+    const W = wx1 - wx0 + 1, H = wy1 - wy0 + 1; if (W <= 0 || H <= 0) { lost++; return lost >= 4; }
+    const mask = new Uint8Array(W * H);
     for (let y = wy0; y <= wy1; y++) for (let x = wx0; x <= wx1; x++) {
-      if (!pts.length && Math.hypot(x - rest.x, y - rest.y) < P.br) continue;
+      if (!pts.length && Math.hypot(x - ball.x, y - ball.y) < P.br) continue;
       const i = (y * PW + x) * 4;
       const mv = Math.abs(d[i] - prev[i]) + Math.abs(d[i + 1] - prev[i + 1]) + Math.abs(d[i + 2] - prev[i + 2]);
-      if (mv > P.DT && cdist(d, i, model.color) < P.CT * 1.25) mask[y * PW + x] = 1;
+      if (mv > P.DT && cdist(d, i, ball.color) < P.CT * 1.25) mask[(y - wy0) * W + (x - wx0)] = 1;
     }
-    const vis = new Uint8Array(PW * PH); let best = null;
-    for (let y = wy0; y <= wy1; y++) for (let x = wx0; x <= wx1; x++) {
-      const k = y * PW + x; if (!mask[k] || vis[k]) continue;
-      const q = [k]; vis[k] = 1; let n = 0, sx = 0, sy = 0;
-      while (q.length) { const kk = q.pop(); n++; sx += kk % PW; sy += (kk / PW) | 0; for (const o of [1, -1, PW, -PW]) { const nk = kk + o; if (nk >= 0 && nk < mask.length && mask[nk] && !vis[nk]) { vis[nk] = 1; q.push(nk); } } }
+    const seen = new Uint8Array(W * H); let best = null;
+    for (let k0 = 0; k0 < W * H; k0++) {
+      if (!mask[k0] || seen[k0]) continue;
+      const q = [k0]; seen[k0] = 1; let n = 0, sx = 0, sy = 0;
+      while (q.length) { const k = q.pop(); const x = k % W, y = (k / W) | 0; n++; sx += x; sy += y;
+        if (x > 0 && mask[k - 1] && !seen[k - 1]) { seen[k - 1] = 1; q.push(k - 1); }
+        if (x < W - 1 && mask[k + 1] && !seen[k + 1]) { seen[k + 1] = 1; q.push(k + 1); }
+        if (y > 0 && mask[k - W] && !seen[k - W]) { seen[k - W] = 1; q.push(k - W); }
+        if (y < H - 1 && mask[k + W] && !seen[k + W]) { seen[k + W] = 1; q.push(k + W); } }
       if (n < Math.max(2, P.area * 0.12) || n > P.area * 9) continue;
-      const cx = sx / n, cy = sy / n, dist = Math.hypot(cx - pred[0], cy - pred[1]);
+      const cx = sx / n + wx0, cy = sy / n + wy0, dist = Math.hypot(cx - pred[0], cy - pred[1]);
       if (!best || dist < best.dist) best = { x: cx, y: cy, dist };
     }
     if (best) { pts.push({ t, x: best.x, y: best.y }); lost = 0; }
@@ -489,7 +557,8 @@ const Cam = (() => {
     const use = pts.slice(0, 8), ts = use.map(p => p.t - T0);
     const vx = fit(ts, use.map(p => p.x)), vy = fit(ts, use.map((p, i) => p.y - 0.5 * g * ts[i] * ts[i]));
     const mSpeed = Math.hypot(vx, vy) / ppm, mAngle = Math.atan2(-vy, Math.abs(vx)) * 180 / Math.PI;
-    if (!(mSpeed > 0.5 && mSpeed < 60) || mAngle < -10 || mAngle > 80) { setState('error', `計測値が不自然でした(${mSpeed.toFixed(1)}m/s, ${mAngle.toFixed(0)}°)。うまくいかない場合はボールを登録し直してください`); cooldownUntil = performance.now() + 2000; return; }
+    if (!(mSpeed > 0.5 && mSpeed < 60) || mAngle < -10 || mAngle > 80) { setState('error', `計測値が不自然でした(${mSpeed.toFixed(1)}m/s, ${mAngle.toFixed(0)}°)。もう一度どうぞ`); cooldownUntil = performance.now() + 2000; return; }
+    learnedColor = ball.color; store.set('ballColor', ball.color);
     const speed = clamp(mSpeed * S.factor, 1, 40), angle = clamp(mAngle + S.angOff, 0, 70);
     const spin = clamp(Math.round(290 * speed * (0.75 + angle / 120) * S.spin / 50) * 50, 500, 11000);
     const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: 0, spin };
@@ -506,17 +575,16 @@ const Cam = (() => {
     if (ov.width !== W || ov.height !== H) { ov.width = W; ov.height = H; }
     octx.clearRect(0, 0, W, H);
     const b = videoBox(), sx = b.w / PW, sy = b.h / PH, dpr = devicePixelRatio;
-    if (model) {
-      const P = params();
-      octx.strokeStyle = 'rgba(255,255,255,.45)'; octx.setLineDash([6 * dpr, 6 * dpr]); octx.lineWidth = 2 * dpr;
-      octx.beginPath(); octx.arc(b.x + P.zx * sx, b.y + P.zy * sy, P.zR * sx, 0, Math.PI * 2); octx.stroke(); octx.setLineDash([]);
-      const p = rest || lastPos;
-      if (p) { octx.strokeStyle = state === 'ready' ? '#3ddc84' : '#ffd24a'; octx.lineWidth = 3 * dpr; octx.beginPath(); octx.arc(b.x + p.x * sx, b.y + p.y * sy, P.br * sx + 5 * dpr, 0, Math.PI * 2); octx.stroke(); }
+    const p = ball || cand;
+    if (p) {
+      octx.strokeStyle = state === 'ready' ? '#2fd07a' : '#e2b857'; octx.lineWidth = 3 * dpr;
+      octx.beginPath(); octx.arc(b.x + p.x * sx, b.y + p.y * sy, p.r * sx + 6 * dpr, 0, Math.PI * 2); octx.stroke();
+      if (state === 'search' && cand) { octx.fillStyle = '#e2b857'; octx.font = `${13 * dpr}px sans-serif`; octx.textAlign = 'center'; octx.fillText('認識中…', b.x + p.x * sx, b.y + (p.y - p.r) * sy - 12 * dpr); }
     }
     const tr = state === 'track' ? pts : (performance.now() < cooldownUntil ? lastTrack : null);
-    if (tr) { octx.fillStyle = '#ff5a3c'; tr.forEach(p => { octx.beginPath(); octx.arc(b.x + p.x * sx, b.y + p.y * sy, 5 * dpr, 0, Math.PI * 2); octx.fill(); }); }
+    if (tr) { octx.fillStyle = '#ff6a4d'; tr.forEach(q => { octx.beginPath(); octx.arc(b.x + q.x * sx, b.y + q.y * sy, 5 * dpr, 0, Math.PI * 2); octx.fill(); }); }
     if (needTap) {
-      octx.fillStyle = 'rgba(0,0,0,.55)'; octx.fillRect(0, H - 44 * dpr, W, 44 * dpr);
+      octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(0, H - 44 * dpr, W, 44 * dpr);
       octx.fillStyle = '#fff'; octx.font = `${15 * dpr}px sans-serif`; octx.textAlign = 'center';
       octx.fillText('止まっているボールをタップしてください', W / 2, H - 16 * dpr);
     }
@@ -525,27 +593,22 @@ const Cam = (() => {
   function frame(t) {
     frameN++;
     const busy = state === 'ready' || state === 'track';
-    // ボール待ちの間は3コマに1回だけ解析して発熱を抑える
-    if (!busy && frameN % 3 !== 0) return;
+    // 探している間は2コマに1回だけ解析して発熱を抑える
+    if (!busy && frameN % 2 !== 0) return;
     const d = grab();
-    ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
-    if (model && !needTap) {
-      const P = params();
-      if (state === 'track') { if (trackStep(d, t, P)) finishTrack(); }
-      else if (performance.now() < cooldownUntil) { /* 結果表示中 */ }
-      else if (state === 'ready') {
-        const f = fracAt(d, P, rest.x, rest.y);
-        if (f < readyFrac * 0.4) { low++; if (low >= 2) { setState('track'); trackStart = t; pts = []; lost = 0; } }
-        else low = 0;
-      } else {
-        if (state !== 'wait') setState('wait');
-        const b = findBall(d, P);
-        if (b) {
-          if (lastPos && Math.hypot(b.x - lastPos.x, b.y - lastPos.y) < 0.4 * P.br) stable++; else stable = 0;
-          lastPos = b;
-          if (stable >= 7) { rest = { x: b.x, y: b.y }; readyFrac = Math.max(0.2, fracAt(d, P, rest.x, rest.y)); low = 0; setState('ready'); }
-        } else { stable = 0; lastPos = null; rest = null; }
-      }
+    if (state === 'track') { if (trackStep(d, t, params())) finishTrack(); }
+    else if (performance.now() < cooldownUntil) { /* 結果表示中 */ }
+    else if (state === 'ready') {
+      const f = fracAt(d, ball.x, ball.y, ball.r);
+      if (f < readyFrac * 0.4) { low++; if (low >= 2) { setState('track'); trackStart = t; pts = []; lost = 0; } }
+      else low = 0;
+    } else if (!needTap) {
+      if (state !== 'search') toSearch();
+      const c = findAuto(d);
+      if (c && cand && Math.hypot(c.x - cand.x, c.y - cand.y) < Math.max(1.2, 0.35 * c.r) && Math.abs(c.r - cand.r) < 0.35 * cand.r) stable++;
+      else stable = 0;
+      cand = c;
+      if (c && stable >= 8) becomeReady(d, c);
     }
     prev = d;
     if (!dark) drawOverlay();
@@ -561,28 +624,36 @@ const Cam = (() => {
     }
   }
   setButtons();
+  // テスト用:合成画像で自動認識を確かめる
+  window.__oaFindAuto = (d) => findAuto(d);
   return { pushStatus, onInfo };
 })();
 
 /* ======================================================================
-   WORLD (iPad): 3D course, rendered only when something changes
+   WORLD (iPad): 3D course. Renders only when something moves.
    ====================================================================== */
 const World = (() => {
-  let renderer, scene, cam, root, ball, shadow, aimGroup, markerGroup, trailGroup, ballsGroup;
-  let course = null, anim = null, dirty = true, inited = false, viewMode = 'follow', tapCb = null;
+  let renderer, scene, cam, root, ballM, shadow, aimGroup, markerGroup, trailGroup, ballsGroup;
+  let course = null, anim = null, dirty = true, inited = false, viewMode = 'follow', tapCb = null, progressCb = null;
   let focus = { x: 0, z: 0 }, heading = 0, reach = 30;
   const camPos = new THREE.Vector3(-4, 2, 0), camLook = new THREE.Vector3(10, 0, 0), curLook = new THREE.Vector3(10, 0, 0);
-  const rand = (a, b) => a + Math.random() * (b - a);
-  function texCanvas(w, h, draw, rep) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep, rep); return t; }
-  function noise(ctx, w, h, base, amp, n) { ctx.fillStyle = base; ctx.fillRect(0, 0, w, h); for (let i = 0; i < n; i++) { const a = Math.random() * amp; ctx.fillStyle = Math.random() < .5 ? `rgba(0,0,0,${a})` : `rgba(255,255,255,${a * .6})`; ctx.fillRect(Math.random() * w, Math.random() * h, 2, 2); } }
+  let seed = 1; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const rand = (a, b) => a + rnd() * (b - a);
+  function texCanvas(w, h, draw, rep) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep, rep); t.anisotropy = 4; return t; }
+  function grass(ctx, w, h, base, amp, n, blade) {
+    ctx.fillStyle = base; ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < n; i++) { const a = Math.random() * amp; ctx.fillStyle = Math.random() < .55 ? `rgba(0,0,0,${a})` : `rgba(255,255,230,${a * .5})`; const x = Math.random() * w, y = Math.random() * h; if (blade) ctx.fillRect(x, y, 1, 2 + Math.random() * 3); else ctx.fillRect(x, y, 2, 2); }
+  }
   let TEX = null;
   function textures() {
     if (TEX) return TEX;
     TEX = {
-      rough: texCanvas(256, 256, (c, w, h) => noise(c, w, h, '#3c7331', .2, 6000), 0.25),
-      fairway: texCanvas(256, 256, (c, w, h) => { for (let i = 0; i < 4; i++) { c.fillStyle = i % 2 ? '#5aa548' : '#529c41'; c.fillRect(0, i * h / 4, w, h / 4); } for (let i = 0; i < 2500; i++) { c.fillStyle = `rgba(0,0,0,${Math.random() * .07})`; c.fillRect(Math.random() * w, Math.random() * h, 1.5, 1.5); } }, 1 / 12),
-      green: texCanvas(256, 256, (c, w, h) => { for (let i = 0; i < 8; i++) { c.fillStyle = i % 2 ? '#68bd55' : '#5fb14c'; c.fillRect(i * w / 8, 0, w / 8, h); } for (let i = 0; i < 2500; i++) { c.fillStyle = `rgba(0,0,0,${Math.random() * .05})`; c.fillRect(Math.random() * w, Math.random() * h, 1, 1); } }, 1 / 8),
-      fringe: texCanvas(128, 128, (c, w, h) => noise(c, w, h, '#4f9a45', .12, 1500), 0.5)
+      rough: texCanvas(256, 256, (c, w, h) => grass(c, w, h, '#2f6a2b', .22, 9000, true), 0.25),
+      fairway: texCanvas(256, 256, (c, w, h) => { for (let i = 0; i < 4; i++) { c.fillStyle = i % 2 ? '#4f9c40' : '#468f38'; c.fillRect(0, i * h / 4, w, h / 4); } for (let i = 0; i < 4000; i++) { c.fillStyle = `rgba(0,0,0,${Math.random() * .07})`; c.fillRect(Math.random() * w, Math.random() * h, 1.5, 1.5); } }, 1 / 12),
+      green: texCanvas(256, 256, (c, w, h) => { for (let i = 0; i < 8; i++) { c.fillStyle = i % 2 ? '#5fb64e' : '#57ab47'; c.fillRect(i * w / 8, 0, w / 8, h); } for (let i = 0; i < 3000; i++) { c.fillStyle = `rgba(0,0,0,${Math.random() * .045})`; c.fillRect(Math.random() * w, Math.random() * h, 1, 1); } }, 1 / 8),
+      fringe: texCanvas(128, 128, (c, w, h) => grass(c, w, h, '#478e3c', .12, 1800), 0.5),
+      water: texCanvas(256, 256, (c, w, h) => { c.fillStyle = '#2b78ad'; c.fillRect(0, 0, w, h); for (let i = 0; i < 260; i++) { c.strokeStyle = `rgba(255,255,255,${0.04 + Math.random() * 0.08})`; c.lineWidth = 1; const x = Math.random() * w, y = Math.random() * h; c.beginPath(); c.moveTo(x, y); c.quadraticCurveTo(x + 8, y - 2, x + 16, y); c.stroke(); } }, 1 / 10),
+      rock: texCanvas(128, 128, (c, w, h) => grass(c, w, h, '#6a5642', .25, 2500), 0.25)
     };
     return TEX;
   }
@@ -590,22 +661,28 @@ const World = (() => {
     if (inited) return; inited = true;
     const world = $('world');
     renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
-    renderer.setPixelRatio(Math.min(1.5, devicePixelRatio)); renderer.shadowMap.enabled = true;
+    renderer.setPixelRatio(Math.min(1.5, devicePixelRatio)); renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     world.prepend(renderer.domElement);
-    scene = new THREE.Scene(); scene.background = new THREE.Color('#bcdbe8'); scene.fog = new THREE.Fog('#bcdbe8', 70, 190);
-    cam = new THREE.PerspectiveCamera(50, 16 / 10, 0.05, 400);
-    scene.add(new THREE.HemisphereLight('#eaf6ff', '#3d5a2c', 0.78));
-    const sun = new THREE.DirectionalLight('#fff6e5', 0.75); sun.position.set(-20, 40, 18); sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024); Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, far: 140 });
-    sun.target.position.set(40, 0, 0); scene.add(sun, sun.target);
-    const treeMat = new THREE.MeshLambertMaterial({ color: '#2b5a2a' });
-    for (let i = 0; i < 44; i++) { const a = Math.random() * Math.PI * 2, r = rand(120, 160); const t = new THREE.Mesh(new THREE.ConeGeometry(rand(3, 5), rand(9, 16), 6), treeMat); t.position.set(50 + Math.cos(a) * r, 5, Math.sin(a) * r); scene.add(t); }
-    ball = new THREE.Mesh(new THREE.SphereGeometry(0.06, 20, 14), new THREE.MeshLambertMaterial({ color: '#ffffff' })); ball.castShadow = true; scene.add(ball);
-    shadow = new THREE.Mesh(new THREE.CircleGeometry(0.07, 16), new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: .25 })); shadow.rotation.x = -Math.PI / 2; decal(shadow, 55); scene.add(shadow);
+    scene = new THREE.Scene(); scene.fog = new THREE.Fog('#cfe3ea', 90, 260);
+    cam = new THREE.PerspectiveCamera(48, 16 / 10, 0.05, 600);
+    // sky dome with vertical gradient
+    const skyGeo = new THREE.SphereGeometry(500, 32, 16); const cols = []; const pos = skyGeo.attributes.position;
+    const top = new THREE.Color('#3f86c8'), hor = new THREE.Color('#d7ebf1'), tmp = new THREE.Color();
+    for (let i = 0; i < pos.count; i++) { const y = pos.getY(i) / 500; tmp.copy(hor).lerp(top, clamp(y * 1.6, 0, 1)); cols.push(tmp.r, tmp.g, tmp.b); }
+    skyGeo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    scene.add(new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false })));
+    scene.add(new THREE.HemisphereLight('#eef7ff', '#35502a', 0.72));
+    const sun = new THREE.DirectionalLight('#fff1d6', 0.85); sun.position.set(-30, 60, 25); sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 90, bottom: -90, far: 200 });
+    sun.target.position.set(45, 0, 0); scene.add(sun, sun.target);
+    // distant hills
+    const hillMat = new THREE.MeshLambertMaterial({ color: '#5f8a63', flatShading: true });
+    for (let i = 0; i < 26; i++) { const a = (i / 26) * Math.PI * 2 + rand(-.1, .1), r = rand(230, 300); const h = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), hillMat); h.scale.set(rand(40, 80), rand(14, 34), rand(40, 80)); h.position.set(60 + Math.cos(a) * r, -4, Math.sin(a) * r); scene.add(h); }
+    ballM = new THREE.Mesh(new THREE.SphereGeometry(0.065, 24, 16), new THREE.MeshPhongMaterial({ color: '#ffffff', shininess: 60 })); ballM.castShadow = true; scene.add(ballM);
+    shadow = new THREE.Mesh(new THREE.CircleGeometry(0.075, 16), new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: .28, depthWrite: false })); shadow.rotation.x = -Math.PI / 2; shadow.renderOrder = 60; scene.add(shadow);
     aimGroup = new THREE.Group(); markerGroup = new THREE.Group(); trailGroup = new THREE.Group(); ballsGroup = new THREE.Group();
     scene.add(aimGroup, markerGroup, trailGroup, ballsGroup);
     new ResizeObserver(resize).observe(world);
-    // タップで狙いを決める(ドラッグは無視)
     let down = null;
     renderer.domElement.addEventListener('pointerdown', (e) => { down = [e.clientX, e.clientY]; });
     renderer.domElement.addEventListener('pointerup', (e) => {
@@ -626,29 +703,32 @@ const World = (() => {
     else { s.pts.forEach(([x, z], i) => i ? sh.lineTo(x, -z) : sh.moveTo(x, -z)); sh.closePath(); }
     return sh;
   }
-  // 地面の層は重なり順(renderOrder)で描き分け、奥行きのちらつきを防ぐ
-  function flat(shape, y, mat, recv) { const m = new THREE.Mesh(new THREE.ShapeGeometry(shape, 48), mat); m.rotation.x = -Math.PI / 2; m.position.y = y; m.receiveShadow = recv !== false; if (y >= 0) { mat.depthWrite = false; m.renderOrder = Math.round(y * 1000); } return m; }
+  // 地面の層は重なり順で描き分け、奥行きのちらつきを防ぐ
+  function flat(shape, y, mat) { const m = new THREE.Mesh(new THREE.ShapeGeometry(shape, 64), mat); m.rotation.x = -Math.PI / 2; m.position.y = y; m.receiveShadow = true; if (y >= 0) { mat.depthWrite = false; m.renderOrder = Math.round(y * 1000); } return m; }
   function decal(m, order) { m.material.depthWrite = false; m.renderOrder = order; return m; }
+  function bounds(c) {
+    let x0 = -10, x1 = c.pin.x + 15, z0 = -20, z1 = 20;
+    c.shapes.forEach(s => { if (s.kind === 'ellipse') { x0 = Math.min(x0, s.cx - s.rx); x1 = Math.max(x1, s.cx + s.rx); z0 = Math.min(z0, s.cz - s.rz); z1 = Math.max(z1, s.cz + s.rz); } else if (s.kind === 'rect') { x0 = Math.min(x0, s.x0); x1 = Math.max(x1, s.x1); z0 = Math.min(z0, s.z0); z1 = Math.max(z1, s.z1); } else s.pts.forEach(([x, z]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }); });
+    return { x0, x1, z0, z1 };
+  }
   function load(c) {
-    init(); course = c;
+    init(); course = c; seed = 7;
     if (root) { scene.remove(root); root.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
     root = new THREE.Group();
     const T = textures();
     const lam = (opt) => new THREE.MeshLambertMaterial(opt);
-    // ground with holes for chasms
-    const g = new THREE.Shape(); g.moveTo(-120, 200); g.lineTo(260, 200); g.lineTo(260, -200); g.lineTo(-120, -200); g.closePath();
+    const g = new THREE.Shape(); g.moveTo(-200, 300); g.lineTo(360, 300); g.lineTo(360, -300); g.lineTo(-200, -300); g.closePath();
     const chasms = c.shapes.filter(s => s.type === 'chasm');
     chasms.forEach(s => g.holes.push(shapeOf(s)));
     root.add(flat(g, 0, lam({ map: T.rough })));
-    if (c.allGreen) {
-      root.add(flat(shapeOf({ kind: 'rect', x0: -6, x1: c.pin.x + 22, z0: -26, z1: 26 }), 0.004, lam({ map: T.green })));
-    }
-    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => root.add(flat(shapeOf(s), 0.008, lam({ map: T.fairway }))));
+    if (c.allGreen) root.add(flat(shapeOf({ kind: 'rect', x0: -8, x1: c.pin.x + 24, z0: -30, z1: 30 }), 0.004, lam({ map: T.green })));
+    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => { root.add(flat(shapeOf(s, 0.8), 0.006, lam({ map: T.fringe }))); root.add(flat(shapeOf(s), 0.008, lam({ map: T.fairway }))); });
     c.shapes.filter(s => s.type === 'water').forEach(s => {
-      root.add(flat(shapeOf(s, 0.6), 0.012, lam({ color: '#8a7a55' })));
-      root.add(flat(shapeOf(s), 0.016, new THREE.MeshPhongMaterial({ color: '#2d7fb8', shininess: 80, specular: '#bfe3ff' })));
+      root.add(flat(shapeOf(s, 0.9), 0.012, lam({ color: '#b8a57a' })));
+      root.add(flat(shapeOf(s), 0.016, new THREE.MeshPhongMaterial({ map: T.water, shininess: 90, specular: '#cfeaff' })));
     });
-    c.shapes.filter(s => s.top).forEach(s => root.add(flat(shapeOf(s), 0.024, lam({ map: T.fairway }))));
+    c.shapes.filter(s => s.top && s.type === 'rough').forEach(s => root.add(flat(shapeOf(s), 0.02, lam({ map: T.rough, color: '#c8d8b8' }))));
+    c.shapes.filter(s => s.top && s.type === 'fairway').forEach(s => { root.add(flat(shapeOf(s, 0.6), 0.022, lam({ map: T.fringe }))); root.add(flat(shapeOf(s), 0.024, lam({ map: T.fairway }))); });
     const greens = c.shapes.filter(s => s.type === 'green');
     greens.forEach(s => {
       const inWater = c.shapes.some(w => w.type === 'water' && SIM.inShape(w, s.cx, s.cz));
@@ -656,52 +736,72 @@ const World = (() => {
       root.add(flat(shapeOf(s), 0.036, lam({ map: T.green })));
     });
     chasms.forEach(s => {
-      const depth = 6, rock = lam({ color: '#5b4a3a', side: THREE.DoubleSide });
-      const bottom = flat(shapeOf(s), -depth, lam({ color: '#1d1712' })); bottom.renderOrder = -2; root.add(bottom);
+      const depth = 9, rock = lam({ map: T.rock, side: THREE.DoubleSide });
+      const bottom = flat(shapeOf(s), -depth, lam({ color: '#15110d' })); bottom.renderOrder = -2; root.add(bottom);
       const w = s.x1 - s.x0, d = s.z1 - s.z0;
       [[s.x0 + w / 2, s.z0, w, 0], [s.x0 + w / 2, s.z1, w, 0], [s.x0, s.z0 + d / 2, d, Math.PI / 2], [s.x1, s.z0 + d / 2, d, Math.PI / 2]].forEach(([x, z, len, ry]) => {
         const wall = new THREE.Mesh(new THREE.PlaneGeometry(len, depth), rock); wall.position.set(x, -depth / 2, z); wall.rotation.y = ry; wall.renderOrder = -1; root.add(wall);
       });
+      // 崖の中の浮島(岩の柱)
+      c.shapes.filter(t => t.island).forEach(t => { const p = new THREE.Mesh(new THREE.CylinderGeometry(1, 0.8, depth, 24), lam({ map: T.rock })); p.scale.set(t.rx, 1, t.rz); p.position.set(t.cx, -depth / 2 - 0.02, t.cz); p.renderOrder = -1; root.add(p); });
     });
+    // trees (instanced) outside play areas
+    const bb = bounds(c), spots = [];
+    for (let i = 0; i < 700 && spots.length < 120; i++) {
+      const x = rand(bb.x0 - 30, bb.x1 + 30), z = rand(bb.z0 - 30, bb.z1 + 30);
+      let ok = true;
+      for (const [dx, dz] of [[0, 0], [9, 0], [-9, 0], [0, 9], [0, -9], [6, 6], [-6, -6], [6, -6], [-6, 6]]) { const zn = SIM.zoneAt(c, x + dx, z + dz); if (zn !== 'rough' || (c.allGreen && Math.abs(z) < 34 && x < c.pin.x + 28)) { ok = false; break; } }
+      if (ok && Math.hypot(x, z) > 10) spots.push([x, z, rand(0.8, 1.5)]);
+    }
+    const coneG = new THREE.ConeGeometry(2.2, 6.5, 7), trunkG = new THREE.CylinderGeometry(0.25, 0.35, 2, 6);
+    const leaves = new THREE.InstancedMesh(coneG, lam({ color: '#27572b', flatShading: true }), spots.length * 2);
+    const trunks = new THREE.InstancedMesh(trunkG, lam({ color: '#5a4030' }), spots.length);
+    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3();
+    spots.forEach(([x, z, s], i) => {
+      sc.set(s, s, s); p.set(x, 1 * s, z); m4.compose(p, q, sc); trunks.setMatrixAt(i, m4);
+      p.set(x, 4.2 * s, z); m4.compose(p, q, sc); leaves.setMatrixAt(i * 2, m4);
+      sc.set(s * 0.75, s * 0.8, s * 0.75); p.set(x, 7 * s, z); m4.compose(p, q, sc); leaves.setMatrixAt(i * 2 + 1, m4);
+    });
+    leaves.castShadow = true; trunks.castShadow = true; root.add(leaves, trunks);
     // cup, flag, 2m OK circle
     const P = c.pin;
-    const okFill = new THREE.Mesh(new THREE.CircleGeometry(2, 64), new THREE.MeshBasicMaterial({ color: '#fff3a0', transparent: true, opacity: .22, depthWrite: false }));
+    const okFill = new THREE.Mesh(new THREE.CircleGeometry(2, 72), new THREE.MeshBasicMaterial({ color: '#fff3a0', transparent: true, opacity: .2 }));
     okFill.rotation.x = -Math.PI / 2; okFill.position.set(P.x, 0.042, P.z); root.add(decal(okFill, 42));
-    const okRing = new THREE.Mesh(new THREE.RingGeometry(1.93, 2.07, 72), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .95, side: THREE.DoubleSide }));
+    const okRing = new THREE.Mesh(new THREE.RingGeometry(1.92, 2.08, 96), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .95, side: THREE.DoubleSide }));
     okRing.rotation.x = -Math.PI / 2; okRing.position.set(P.x, 0.046, P.z); root.add(decal(okRing, 46));
-    const cup = new THREE.Mesh(new THREE.CircleGeometry(0.054, 24), new THREE.MeshBasicMaterial({ color: '#101010' })); cup.rotation.x = -Math.PI / 2; cup.position.set(P.x, 0.05, P.z); root.add(decal(cup, 50));
+    const cup = new THREE.Mesh(new THREE.CircleGeometry(0.054, 24), new THREE.MeshBasicMaterial({ color: '#0c0c0c' })); cup.rotation.x = -Math.PI / 2; cup.position.set(P.x, 0.05, P.z); root.add(decal(cup, 50));
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 2.2, 8), lam({ color: '#f4f4f4' })); pole.position.set(P.x, 1.1, P.z); pole.castShadow = true; root.add(pole);
-    const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.35), lam({ color: '#e0412a', side: THREE.DoubleSide })); flag.position.set(P.x, 2.0, P.z + 0.27); flag.rotation.y = Math.PI / 2; flag.castShadow = true; root.add(flag);
+    const flagG = new THREE.PlaneGeometry(0.6, 0.38, 6, 1); const fp = flagG.attributes.position; for (let i = 0; i < fp.count; i++) { const x = fp.getX(i) + 0.3; fp.setZ(i, Math.sin(x * 6) * 0.05 * x); }
+    const flag = new THREE.Mesh(flagG, lam({ color: '#e0412a', side: THREE.DoubleSide })); flag.position.set(P.x, 1.98, P.z + 0.3); flag.rotation.y = Math.PI / 2; flag.castShadow = true; root.add(flag);
     // tee mat
-    const tee = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.03, 1.6), lam({ color: '#1f4d2b' })); tee.position.set(c.tee.x, 0.015, c.tee.z); tee.receiveShadow = true; root.add(tee);
+    const tee = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.04, 1.6), lam({ color: '#1d4a2a' })); tee.position.set(c.tee.x, 0.02, c.tee.z); tee.receiveShadow = true; root.add(tee);
     scene.add(root);
-    clearMarkers(); clearTrails(); ballsGroup.clear(); aimGroup.clear();
+    markerGroup.clear(); clearTrails(); ballsGroup.clear(); aimGroup.clear();
     placeBall(c.tee.x, 0, c.tee.z);
     dirty = true;
   }
-  function placeBall(x, y, z) { ball.position.set(x, y + 0.06, z); shadow.position.set(x, 0.055, z); dirty = true; }
+  function placeBall(x, y, z) { ballM.position.set(x, y + 0.065, z); shadow.position.set(x, 0.056, z); shadow.visible = y > -0.02; dirty = true; }
   function clearTrails() { while (trailGroup.children.length) { const o = trailGroup.children.pop(); o.geometry.dispose(); } }
-  function clearMarkers() { markerGroup.clear(); }
   function setBalls(list) {
     ballsGroup.clear();
     list.forEach(b => {
-      const m = new THREE.Mesh(new THREE.SphereGeometry(0.09, 16, 10), new THREE.MeshLambertMaterial({ color: b.color })); m.position.set(b.x, 0.09, b.z); ballsGroup.add(m);
-      const ring = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.28, 24), new THREE.MeshBasicMaterial({ color: b.color, side: THREE.DoubleSide })); ring.rotation.x = -Math.PI / 2; ring.position.set(b.x, 0.055, b.z); ballsGroup.add(decal(ring, 55));
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 10), new THREE.MeshLambertMaterial({ color: b.color })); m.position.set(b.x, 0.1, b.z); ballsGroup.add(m);
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.22, 0.32, 24), new THREE.MeshBasicMaterial({ color: b.color, side: THREE.DoubleSide, transparent: true })); ring.rotation.x = -Math.PI / 2; ring.position.set(b.x, 0.057, b.z); ballsGroup.add(decal(ring, 57));
     });
     dirty = true;
   }
   function addMarker(x, z, color) {
     while (markerGroup.children.length >= 24) markerGroup.remove(markerGroup.children[0]);
-    const m = new THREE.Mesh(new THREE.SphereGeometry(0.06, 12, 8), new THREE.MeshLambertMaterial({ color })); m.position.set(x, 0.06, z); markerGroup.add(m);
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 8), new THREE.MeshLambertMaterial({ color })); m.position.set(x, 0.07, z); markerGroup.add(m);
     dirty = true;
   }
   function setAim(pos, hd, reachM) {
     focus = { x: pos.x, z: pos.z }; heading = hd; reach = reachM;
     aimGroup.clear();
     const dx = Math.cos(hd), dz = Math.sin(hd);
-    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(pos.x, 0.07, pos.z), new THREE.Vector3(pos.x + dx * reachM, 0.07, pos.z + dz * reachM)]);
-    const line = new THREE.Line(geo, new THREE.LineDashedMaterial({ color: '#ffe066', dashSize: 0.8, gapSize: 0.5 })); line.computeLineDistances(); aimGroup.add(decal(line, 70));
-    const arc = new THREE.Mesh(new THREE.RingGeometry(reachM - 0.18, reachM + 0.18, 48, 1, -hd - 0.5, 1.0), new THREE.MeshBasicMaterial({ color: '#ff8a5c', transparent: true, opacity: .85, side: THREE.DoubleSide }));
+    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(pos.x + dx * 0.4, 0.07, pos.z + dz * 0.4), new THREE.Vector3(pos.x + dx * reachM, 0.07, pos.z + dz * reachM)]);
+    const line = new THREE.Line(geo, new THREE.LineDashedMaterial({ color: '#ffe38a', dashSize: 0.9, gapSize: 0.6 })); line.computeLineDistances(); aimGroup.add(decal(line, 70));
+    const arc = new THREE.Mesh(new THREE.RingGeometry(reachM - 0.22, reachM + 0.22, 48, 1, -hd - 0.5, 1.0), new THREE.MeshBasicMaterial({ color: '#ff8a5c', transparent: true, opacity: .9, side: THREE.DoubleSide }));
     arc.rotation.x = -Math.PI / 2; arc.position.set(pos.x, 0.06, pos.z); aimGroup.add(decal(arc, 60));
     placeBall(pos.x, 0, pos.z);
     idleCamera(); dirty = true;
@@ -713,22 +813,31 @@ const World = (() => {
     if (viewMode === 'top') {
       const P = course.pin, cx = (focus.x + P.x) / 2, cz = (focus.z + P.z) / 2;
       const d = Math.max(Math.hypot(P.x - focus.x, P.z - focus.z), reach, 12);
-      const h = d * 1.15 + 6;
-      camPos.set(cx - dx * h * 0.28, h, cz - dz * h * 0.28); camLook.set(cx, 0, cz);
+      const h = d * 1.1 + 6;
+      camPos.set(cx - dx * h * 0.3, h, cz - dz * h * 0.3); camLook.set(cx, 0, cz);
     } else {
-      const L = Math.min(reach, Math.max(8, Math.hypot(course.pin.x - focus.x, course.pin.z - focus.z))) * 0.8;
-      camPos.set(focus.x - dx * 4.5, 2.1, focus.z - dz * 4.5); camLook.set(focus.x + dx * L, 0, focus.z + dz * L);
+      const L = Math.min(reach, Math.max(8, Math.hypot(course.pin.x - focus.x, course.pin.z - focus.z))) * 0.75;
+      camPos.set(focus.x - dx * 4.8, 2.0, focus.z - dz * 4.8); camLook.set(focus.x + dx * L, 0, focus.z + dz * L);
     }
     dirty = true;
   }
   function setView(v) { viewMode = v; $('vFollow').setAttribute('aria-pressed', v === 'follow'); $('vTop').setAttribute('aria-pressed', v === 'top'); if (!anim) idleCamera(); }
   $('vFollow').onclick = () => setView('follow'); $('vTop').onclick = () => setView('top');
+  // 弾道はチューブで描き、飛んだ分だけ見せる
   function play(res, color, onDone) {
     hideAim();
-    const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * 4000), 3)); geo.setDrawRange(0, 0);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color })); trailGroup.add(line);
+    const src = res.pts, step = Math.max(1, Math.floor(src.length / 240));
+    const vs = []; for (let i = 0; i < src.length; i += step) vs.push(new THREE.Vector3(src[i][1], Math.max(src[i][2], -9) + 0.05, src[i][3]));
+    const last = src[src.length - 1]; vs.push(new THREE.Vector3(last[1], last[2] + 0.05, last[3]));
+    if (vs.length < 2) vs.push(vs[0].clone().add(new THREE.Vector3(0.01, 0, 0)));
+    const curve = new THREE.CatmullRomCurve3(vs), seg = vs.length * 2, rad = 6;
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, seg, 0.035, rad, false), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .95 }));
+    tube.geometry.setDrawRange(0, 0); trailGroup.add(tube);
     while (trailGroup.children.length > 8) { const o = trailGroup.children.shift(); trailGroup.remove(o); o.geometry.dispose(); }
-    anim = { res, line, start: performance.now(), onDone };
+    // 着弾点の輪
+    const cr = res.carryPt;
+    if (cr && !res.hazardAtLanding) { const ring = new THREE.Mesh(new THREE.RingGeometry(0.28, 0.4, 32), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide })); ring.rotation.x = -Math.PI / 2; ring.position.set(cr.x, 0.058, cr.z); trailGroup.add(decal(ring, 58)); res._ring = ring; }
+    anim = { res, tube, seg, rad, start: performance.now(), onDone, total: src.length };
   }
   function loop(now) {
     requestAnimationFrame(loop);
@@ -742,12 +851,19 @@ const World = (() => {
       const f = b[0] > a[0] ? clamp((t - a[0]) / (b[0] - a[0]), 0, 1) : 1;
       const x = a[1] + (b[1] - a[1]) * f, y = a[2] + (b[2] - a[2]) * f, z = a[3] + (b[3] - a[3]) * f;
       placeBall(x, y, z);
-      const arr = anim.line.geometry.attributes.position.array, n = Math.min(i + 1, 3999);
-      for (let k = 0; k < n; k++) { arr[k * 3] = pts[k][1]; arr[k * 3 + 1] = pts[k][2] + 0.04; arr[k * 3 + 2] = pts[k][3]; }
-      arr[n * 3] = x; arr[n * 3 + 1] = y + 0.04; arr[n * 3 + 2] = z;
-      anim.line.geometry.setDrawRange(0, n + 1); anim.line.geometry.attributes.position.needsUpdate = true;
-      if (viewMode === 'follow') { const s = anim.res.pts[0], e = pts[Math.min(i + 3, pts.length - 1)]; let dx = e[1] - s[1], dz = e[3] - s[3]; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L; if (L < 0.5) { dx = Math.cos(heading); dz = Math.sin(heading); } camPos.set(x - dx * 5.5, Math.max(1.6, y + 1.8), z - dz * 5.5); camLook.set(x + dx * 2, y * 0.6, z + dz * 2); }
-      if (t >= anim.res.duration + 0.05) { const cb = anim.onDone; anim = null; if (cb) cb(); }
+      const frac = clamp((i + f) / Math.max(1, pts.length - 1), 0, 1);
+      anim.tube.geometry.setDrawRange(0, Math.floor(frac * anim.seg) * anim.rad * 6);
+      if (anim.res._ring && t >= anim.res.carryT) anim.res._ring.material.opacity = 0.9;
+      if (progressCb) progressCb(anim.res, frac);
+      if (viewMode === 'follow') { const s = pts[0], e = pts[Math.min(i + 3, pts.length - 1)]; let dx = e[1] - s[1], dz = e[3] - s[3]; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L; if (L < 0.5) { dx = Math.cos(heading); dz = Math.sin(heading); } camPos.set(x - dx * 5.5, Math.max(1.6, y + 1.8), z - dz * 5.5); camLook.set(x + dx * 2, Math.max(0, y) * 0.6, z + dz * 2); }
+      if (t >= anim.res.duration + 0.05) {
+        // 飛び終わった弾道は細い線に置き換えて、次の打席の邪魔にしない
+        const tube = anim.tube, color = tube.material.color.clone();
+        trailGroup.remove(tube); tube.geometry.dispose();
+        const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(anim.res.pts.map(q => new THREE.Vector3(q[1], Math.max(q[2], -9) + 0.05, q[3]))), new THREE.LineBasicMaterial({ color, transparent: true, opacity: .8 }));
+        trailGroup.add(line);
+        const cb = anim.onDone; anim = null; if (progressCb) progressCb(null, 1); if (cb) cb();
+      }
     }
     if (cam.position.distanceTo(camPos) > 0.01 || curLook.distanceTo(camLook) > 0.01) { moving = true; cam.position.lerp(camPos, 0.07); curLook.lerp(camLook, 0.09); }
     if (!moving && !dirty) return; // 何も動いていないときは描画しない(発熱対策)
@@ -755,8 +871,40 @@ const World = (() => {
     renderer.render(scene, cam);
     dirty = false;
   }
-  function focusOn(x, z) { camLook.set(x, 0, z); dirty = true; }
-  return { init, load, setAim, hideAim, setBalls, addMarker, clearMarkers, clearTrails, play, placeBall, resize, focusOn, onTap: (cb) => { tapCb = cb; }, busy: () => !!anim };
+  return { init, load, setAim, hideAim, setBalls, addMarker, play, placeBall, resize, onTap: (cb) => { tapCb = cb; }, onProgress: (cb) => { progressCb = cb; }, busy: () => !!anim };
+})();
+
+/* ---------------- side-view trajectory chart ---------------- */
+const Profile = (() => {
+  const cv = $('profile'), ctx = cv.getContext('2d');
+  let cur = null;
+  function size() { const r = cv.getBoundingClientRect(); const W = Math.round(r.width * devicePixelRatio), H = Math.round(r.height * devicePixelRatio); if (W && (cv.width !== W || cv.height !== H)) { cv.width = W; cv.height = H; } }
+  function draw(res, frac) {
+    if (res) cur = { res, frac }; else if (cur) cur.frac = 1;
+    size(); const W = cv.width, H = cv.height, dpr = devicePixelRatio;
+    ctx.clearRect(0, 0, W, H);
+    const pad = 10 * dpr, base = H - 18 * dpr;
+    ctx.fillStyle = 'rgba(200,220,205,.75)'; ctx.font = `${10 * dpr}px sans-serif`; ctx.textAlign = 'left';
+    ctx.fillText('弾道(横から)', pad, 13 * dpr);
+    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * dpr; ctx.beginPath(); ctx.moveTo(pad, base); ctx.lineTo(W - pad, base); ctx.stroke();
+    if (!cur) return;
+    const r = cur.res, p = r.pts, s = p[0];
+    const hx = (q) => Math.hypot(q[1] - s[1], q[3] - s[3]);
+    const maxD = Math.max(yd(r.total) * 1.12, 10), maxH = Math.max(r.apex * 1.3, 2);
+    const X = (m) => pad + (yd(m) / maxD) * (W - 2 * pad), Y = (h) => base - (Math.max(h, 0) / maxH) * (base - 22 * dpr);
+    const n = Math.max(1, Math.floor(cur.frac * (p.length - 1)));
+    ctx.strokeStyle = '#ffe38a'; ctx.lineWidth = 2.2 * dpr; ctx.beginPath();
+    for (let i = 0; i <= n; i++) { const q = p[i]; i ? ctx.lineTo(X(hx(q)), Y(q[2])) : ctx.moveTo(X(hx(q)), Y(q[2])); }
+    ctx.stroke();
+    ctx.fillStyle = '#c3d1c8'; ctx.font = `${10 * dpr}px ui-monospace,monospace`;
+    if (cur.frac >= 1) {
+      ctx.fillStyle = '#ffe38a'; ctx.beginPath(); ctx.arc(X(r.carry), base, 3 * dpr, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#c3d1c8'; ctx.textAlign = 'center';
+      ctx.fillText(`キャリー ${fy(r.carry)}yd`, clamp(X(r.carry), 50 * dpr, W - 50 * dpr), H - 4 * dpr);
+      ctx.textAlign = 'right'; ctx.fillText(`最高 ${r.apex.toFixed(1)}m`, W - pad, 13 * dpr);
+    }
+  }
+  return { draw, clear: () => { cur = null; draw(null, 0); } };
 })();
 
 /* ======================================================================
@@ -765,21 +913,24 @@ const World = (() => {
 const App = (() => {
   let limit = store.get('limit', 35), nPlayers = store.get('np', 1);
   const names = [store.get('name0', 'プレイヤー1'), store.get('name1', 'プレイヤー2')];
-  const COLORS = ['#e2553a', '#3f78e0'];
-  let G = null, readyState = 'off';
+  const COLORS = ['#ff6a4d', '#5b9bff'];
+  let G = null, readyState = 'off', paired = false;
   const seen = new Set();
   const limitM = () => limit * YD;
   const freeReach = () => (G && G.yd ? G.yd + 3 : 30) * YD;
   const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
   const headingTo = (a, b) => Math.atan2(b.z - a.z, b.x - a.x);
+  World.onProgress((res, frac) => Profile.draw(res, frac));
 
   /* ---- home ---- */
   function initHome() {
     [...$('limitSeg').children].forEach(b => { b.setAttribute('aria-pressed', +b.dataset.v === limit); b.onclick = () => { limit = +b.dataset.v; store.set('limit', limit); initHome(); }; });
     const u = COURSES.unitYd(limit);
-    $('limitNote').textContent = `コースの長さ:パー2 ${u}ヤード/パー3 ${u * 2}ヤード/パー4 ${u * 3}ヤード`;
-    setReady(readyState);
+    $('limitNote').textContent = `ホールの長さ:パー2 ${u}ヤード/パー3 ${u * 2}ヤード/パー4 ${u * 3}ヤード`;
+    $('soundOn').checked = Sound.on(); $('soundOn').onchange = () => store.set('sound', $('soundOn').checked);
+    setReady(readyState); setPaired(paired);
   }
+  function setPaired(p) { paired = p; $('gs1').classList.toggle('done', p); if (!p) $('gs2').classList.remove('done'); }
   $('goFree').onclick = () => { buildDist(); show('freeView'); };
   $('goCourse').onclick = () => { buildCourses(); show('courseView'); };
   document.querySelectorAll('[data-back]').forEach(b => { b.onclick = () => { show('homeView'); initHome(); }; });
@@ -799,39 +950,39 @@ const App = (() => {
     COURSES.defs.forEach(d => {
       const c = COURSES.make(d.id, limit);
       const b = el('button', 'ccard');
-      const cv = document.createElement('canvas'); cv.width = 320; cv.height = 200; drawMini(cv, c);
-      const meta = el('div', 'meta'); meta.append(el('span', 'par', `パー${c.par}・${c.lengthYd}ヤード`), el('span', 'style' + (d.style === 'テクニカル' ? ' tech' : ''), d.style));
+      const cv = document.createElement('canvas'); cv.width = 480; cv.height = 360; drawMini(cv, c);
+      const meta = el('div', 'meta'); meta.append(el('span', 'par', `PAR ${c.par}・${c.lengthYd}YD`), el('span', 'style' + (d.style === 'テクニカル' ? ' tech' : ''), d.style));
       b.append(cv, meta, el('b', null, c.name), el('span', 'd', c.desc));
       b.onclick = () => startCourse(d.id);
       g.append(b);
     });
   }
-  // 上から見たミニマップ(ティーが下、ピンが上)
+  // 上から見たコース図(ティーが下、ピンが上)
   function drawMini(cv, c) {
     const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
-    let minX = -4, maxX = c.pin.x + 8, minZ = -8, maxZ = 8;
-    c.shapes.forEach(s => { if (s.kind === 'ellipse') { minX = Math.min(minX, s.cx - s.rx); maxX = Math.max(maxX, s.cx + s.rx); minZ = Math.min(minZ, s.cz - s.rz); maxZ = Math.max(maxZ, s.cz + s.rz); } else if (s.kind === 'rect') { minZ = Math.min(minZ, s.z0); maxZ = Math.max(maxZ, s.z1); } });
-    minZ = Math.max(minZ, -60); maxZ = Math.min(maxZ, 60); maxX = Math.min(maxX, c.pin.x + 14);
-    const sc = Math.min((H - 16) / (maxX - minX), (W - 16) / (maxZ - minZ));
-    const ox = W / 2 - ((minZ + maxZ) / 2) * sc, oy = H - 8 + minX * sc;
+    let minX = -6, maxX = c.pin.x + 10, minZ = -12, maxZ = 12;
+    const ext = (x, z) => { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z); };
+    c.shapes.forEach(s => { if (s.kind === 'ellipse') { ext(s.cx - s.rx, s.cz - s.rz); ext(s.cx + s.rx, s.cz + s.rz); } else if (s.kind === 'rect') { ext(s.x0, s.z0); ext(s.x1, s.z1); } else s.pts.forEach(([x, z]) => ext(x, z)); });
+    minZ = Math.max(minZ, -70); maxZ = Math.min(maxZ, 70); maxX = Math.min(maxX, c.pin.x + 16); minX = Math.max(minX, -8);
+    const sc = Math.min((H - 24) / (maxX - minX), (W - 24) / (maxZ - minZ));
+    const ox = W / 2 - ((minZ + maxZ) / 2) * sc, oy = H - 12 + minX * sc;
     const P = (x, z) => [ox + z * sc, oy - x * sc];
-    ctx.fillStyle = '#3c7331'; ctx.fillRect(0, 0, W, H);
-    const drawS = (s, col, grow) => {
-      ctx.fillStyle = col; ctx.beginPath();
-      if (s.kind === 'ellipse') { const [x, y] = P(s.cx, s.cz); ctx.ellipse(x, y, (s.rz + (grow || 0)) * sc, (s.rx + (grow || 0)) * sc, 0, 0, Math.PI * 2); }
-      else { const [x0, y0] = P(s.x1, s.z0), [x1, y1] = P(s.x0, s.z1); ctx.rect(x0, y0, x1 - x0, y1 - y0); }
-      ctx.fill();
-    };
-    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => drawS(s, '#5aa548'));
-    c.shapes.filter(s => s.type === 'water').forEach(s => drawS(s, '#2d7fb8'));
-    c.shapes.filter(s => s.type === 'chasm').forEach(s => drawS(s, '#1d1712'));
-    c.shapes.filter(s => s.top).forEach(s => drawS(s, '#5aa548'));
-    c.shapes.filter(s => s.type === 'green').forEach(s => { drawS(s, '#8ad672'); });
+    const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#24552a'); bg.addColorStop(1, '#1b4221'); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 900; i++) { ctx.fillStyle = `rgba(0,0,0,${Math.random() * .12})`; ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
+    const path = (s, grow) => { ctx.beginPath(); const g2 = grow || 0; if (s.kind === 'ellipse') { const [x, y] = P(s.cx, s.cz); ctx.ellipse(x, y, (s.rz + g2) * sc, (s.rx + g2) * sc, 0, 0, Math.PI * 2); } else if (s.kind === 'rect') { const [x0, y0] = P(s.x1, s.z0), [x1, y1] = P(s.x0, s.z1); ctx.rect(x0, y0, x1 - x0, y1 - y0); } else { s.pts.forEach(([x, z], i) => { const [a, b] = P(x, z); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.closePath(); } };
+    const fill = (s, col, grow) => { path(s, grow); ctx.fillStyle = col; ctx.fill(); };
+    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => fill(s, '#58a347'));
+    c.shapes.filter(s => s.type === 'water').forEach(s => { fill(s, '#c9b88c', 0.9); fill(s, '#2f7fb6'); });
+    c.shapes.filter(s => s.type === 'chasm').forEach(s => { fill(s, '#120e0b'); path(s); ctx.strokeStyle = '#7a6450'; ctx.lineWidth = 2; ctx.stroke(); });
+    c.shapes.filter(s => s.top && s.type === 'rough').forEach(s => fill(s, '#2f6a2b'));
+    c.shapes.filter(s => s.top && s.type === 'fairway').forEach(s => fill(s, '#58a347'));
+    c.shapes.filter(s => s.type === 'green').forEach(s => { fill(s, '#4f9a45', 1.2); fill(s, '#8ad672'); });
     const [px, py] = P(c.pin.x, c.pin.z), [tx, ty] = P(0, 0);
-    ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.setLineDash([5, 5]); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(tx, ty);
-    c.route.forEach(r => { const [x, y] = P(r.x, r.z); ctx.lineTo(x, y); }); ctx.lineTo(px, py); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(tx, ty, 4, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#e0412a'; ctx.beginPath(); ctx.arc(px, py, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,240,190,.85)'; ctx.setLineDash([7, 6]); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(tx, ty);
+    c.route.filter(r => !c.shapes.some(s => s.island && SIM.inShape(s, r.x, r.z))).forEach(r => { const [x, y] = P(r.x, r.z); ctx.lineTo(x, y); }); ctx.lineTo(px, py); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(tx, ty, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py - 16); ctx.stroke();
+    ctx.fillStyle = '#e0412a'; ctx.beginPath(); ctx.moveTo(px, py - 16); ctx.lineTo(px + 11, py - 12); ctx.lineTo(px, py - 8); ctx.fill();
   }
 
   /* ---- play common ---- */
@@ -839,15 +990,30 @@ const App = (() => {
     show('playView');
     $('sideFree').hidden = mode !== 'free'; $('sideCourse').hidden = mode !== 'course';
     $('aimBar').hidden = mode !== 'course'; $('resultBox').hidden = true; $('banner').hidden = true;
-    ['gSpeed', 'gAngle', 'gSpin', 'gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '–'; });
+    ['gSpeed', 'gAngle', 'gSpin', 'gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '–'; }); $('gPinU').textContent = '';
+    Profile.clear();
     setReady(readyState);
   }
-  function banner(t, sub, ms) {
-    const b = $('banner'); b.textContent = t; if (sub) b.append(el('small', null, sub)); b.hidden = false;
+  function banner(t, sub, ms, kind) {
+    const b = $('banner'); b.textContent = t; if (sub) b.append(el('small', null, sub)); b.className = 'banner' + (kind ? ' ' + kind : ''); b.hidden = false;
     clearTimeout(banner._t); if (ms) banner._t = setTimeout(() => { b.hidden = true; }, ms);
   }
-  function showShotStart(shot) { $('gSpeed').textContent = shot.speed.toFixed(1) + ' m/s'; $('gAngle').textContent = shot.angle.toFixed(1) + '°'; $('gSpin').textContent = Math.round(shot.spin) + ' rpm'; ['gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '…'; }); $('banner').hidden = true; }
-  function showShotEnd(res) { $('gCarry').textContent = fy(res.carry) + ' yd'; $('gTotal').textContent = fy(res.total) + ' yd'; $('gPin').textContent = res.hazard ? '–' : res.holed ? 'カップイン' : fDist(res.toPin); }
+  function showShotStart(shot) { $('gSpeed').textContent = shot.speed.toFixed(1); $('gAngle').textContent = shot.angle.toFixed(1); $('gSpin').textContent = String(Math.round(shot.spin)); ['gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '…'; }); $('gPinU').textContent = ''; $('banner').hidden = true; }
+  function showShotEnd(res) {
+    $('gCarry').textContent = fy(res.carry); $('gTotal').textContent = fy(res.total);
+    if (res.hazard) { $('gPin').textContent = '–'; $('gPinU').textContent = ''; }
+    else if (res.holed) { $('gPin').textContent = 'IN'; $('gPinU').textContent = ''; }
+    else if (res.toPin < 1) { $('gPin').textContent = String(Math.round(res.toPin * 100)); $('gPinU').textContent = 'cm'; }
+    else { $('gPin').textContent = res.toPin.toFixed(1); $('gPinU').textContent = 'm'; }
+  }
+  function simulate(s, c, start, hd) {
+    const res = SIM.simulate(s, c, start, hd);
+    let apex = 0, carryT = res.duration; for (const p of res.pts) if (p[2] > apex) apex = p[2];
+    // 着弾点(最初に地面に触れた点)
+    for (let i = 1; i < res.pts.length; i++) if (res.pts[i][2] <= 0.001 && res.pts[i - 1][2] > 0.001) { carryT = res.pts[i][0]; res.carryPt = { x: res.pts[i][1], z: res.pts[i][3] }; break; }
+    res.apex = apex; res.carryT = carryT; res.hazardAtLanding = res.hazard && res.pts.length < 3;
+    return res;
+  }
 
   /* ---- free practice ---- */
   function startFree(d) {
@@ -855,18 +1021,17 @@ const App = (() => {
     G = { mode: 'free', yd: d, course: c, shots: [], busy: false };
     enterPlay('free');
     World.load(c); World.setAim(c.tee, 0, freeReach());
-    $('hTitle').textContent = 'フリー練習'; $('hMain').textContent = `ピンまで ${d}ヤード`;
-    $('hTurn').textContent = 'グリーン'; $('hSub').textContent = `速さ ${c.stimp}ft`;
+    $('hTitle').textContent = 'フリー練習'; $('hMain').textContent = `ピンまで ${d}ヤード`; $('hExtra').textContent = '全面グリーン';
+    $('hTurn').textContent = 'グリーン'; $('hSub').textContent = `速さ ${c.stimp}ft`; $('hLie').textContent = 'マットから';
     World.onTap(null);
     renderFree(); sendInfo();
   }
   function afterFree(res) {
-    const over = false, ok = res.holed || res.toPin <= 2;
-    G.shots.push({ total: res.total, toPin: res.toPin, ok, over, holed: res.holed });
-    World.addMarker(res.end.x, res.end.z, over ? '#ff5a3c' : ok ? '#ffe066' : '#ffffff');
-    if (res.holed) banner('カップイン!', null, 2500);
-    else if (over) banner('上限オーバー', `総距離 ${fy(res.total)}ヤード`, 2500);
-    else if (ok) banner('OK!', `ピンまで ${fDist(res.toPin)}`, 2500);
+    const ok = res.holed || res.toPin <= 2;
+    G.shots.push({ total: res.total, toPin: res.toPin, ok, holed: res.holed });
+    World.addMarker(res.end.x, res.end.z, ok ? '#ffe38a' : '#ffffff');
+    if (res.holed) { banner('カップイン!', null, 2600, 'good'); Sound.good(); }
+    else if (ok) { banner('OK!', `ピンまで ${fDist(res.toPin)}`, 2600, 'good'); Sound.good(); }
     else banner(`ピンまで ${fDist(res.toPin)}`, null, 2000);
     renderFree();
     setTimeout(() => { if (G && G.mode === 'free') { World.setAim(G.course.tee, 0, freeReach()); G.busy = false; } }, 1600);
@@ -874,32 +1039,31 @@ const App = (() => {
   function renderFree() {
     const s = G.shots, n = s.length;
     $('fsN').textContent = n;
-    $('fsOk').textContent = n ? `${Math.round(s.filter(x => x.ok && !x.over).length / n * 100)}%` : '–';
-    const valid = s.filter(x => !x.over);
-    $('fsAvg').textContent = valid.length ? fDist(valid.reduce((a, b) => a + b.toPin, 0) / valid.length) : '–';
-    $('fsBest').textContent = valid.length ? fDist(Math.min(...valid.map(x => x.toPin))) : '–';
+    $('fsOk').textContent = n ? `${Math.round(s.filter(x => x.ok).length / n * 100)}%` : '–';
+    $('fsAvg').textContent = n ? fDist(s.reduce((a, b) => a + b.toPin, 0) / n) : '–';
+    $('fsBest').textContent = n ? fDist(Math.min(...s.map(x => x.toPin))) : '–';
     const t = $('freeLog'); t.textContent = '';
     const hr = el('tr'); ['#', '総距離', 'ピンまで', ''].forEach((h, i) => hr.append(el('th', i ? 'n' : null, h))); t.append(hr);
-    if (!n) { const r = el('tr'); const c = el('td', 'empty', 'iPhoneの「打ってOK」を確認して打ってみましょう。'); c.colSpan = 4; r.append(c); t.append(r); }
+    if (!n) { const r = el('tr'); const c = el('td', 'empty', '画面上に「打ってOK」が出たら打ってみましょう。'); c.colSpan = 4; r.append(c); t.append(r); }
     s.map((x, i) => [x, i]).reverse().forEach(([x, i]) => {
       const r = el('tr');
-      r.append(el('td', null, String(i + 1)), el('td', 'n', fy(x.total) + 'yd'), el('td', 'n', x.holed ? 'IN' : fDist(x.toPin)), el('td', 'n' + (x.over ? ' bad' : x.ok ? ' good' : ''), x.over ? 'オーバー' : x.ok ? 'OK' : ''));
+      r.append(el('td', null, String(i + 1)), el('td', 'n', fy(x.total) + 'yd'), el('td', 'n', x.holed ? 'IN' : fDist(x.toPin)), el('td', 'n' + (x.ok ? ' good' : ''), x.ok ? 'OK' : ''));
       t.append(r);
     });
   }
   $('changeDist').onclick = () => { buildDist(); show('freeView'); };
 
   /* ---- course ---- */
-  let lastCourseId = null;
+  let lastCourseId = null, routeIdx = 0;
   function startCourse(id) {
     lastCourseId = id;
     const c = COURSES.make(id, limit);
     const players = [];
-    for (let i = 0; i < nPlayers; i++) players.push({ name: names[i], color: COLORS[i], cls: 'c' + (i + 1), pos: { ...c.tee }, strokes: 0, done: false, score: null, note: '', log: [] });
+    for (let i = 0; i < nPlayers; i++) players.push({ name: names[i], color: COLORS[i], cls: 'c' + (i + 1), pos: { ...c.tee }, strokes: 0, done: false, score: null, log: [] });
     G = { mode: 'course', course: c, players, cur: 0, aim: 0, busy: false };
     enterPlay('course');
     World.load(c);
-    $('hTitle').textContent = `${c.name}・パー${c.par}`; $('hMain').textContent = `${c.lengthYd}ヤード`;
+    $('hTitle').textContent = `PAR ${c.par}・${c.style}`; $('hMain').textContent = c.name; $('hExtra').textContent = `${c.lengthYd}ヤード・上限${limit}ヤード`;
     $('aimRoute').hidden = !c.route.length;
     World.onTap((x, z) => { if (!G || G.mode !== 'course' || G.busy) return; const p = G.players[G.cur]; if (Math.hypot(x - p.pos.x, z - p.pos.z) < 1) return; G.aim = headingTo(p.pos, { x, z }); World.setAim(p.pos, G.aim, limitM()); });
     beginTurn();
@@ -909,15 +1073,16 @@ const App = (() => {
   function beginTurn() {
     const i = nextPlayer();
     if (i < 0) { finishHole(); return; }
-    G.cur = i; G.busy = false;
+    G.cur = i; G.busy = false; routeIdx = 0;
     const p = G.players[i];
     G.aim = headingTo(p.pos, G.course.pin);
     World.setBalls(G.players.filter((q, k) => k !== i && !q.done && dist(q.pos, p.pos) > 0.4).map(q => ({ x: q.pos.x, z: q.pos.z, color: q.color })));
     World.setAim(p.pos, G.aim, limitM());
     const lie = lieOf(p.pos);
     $('hTurn').textContent = `${G.players.length > 1 ? p.name + '・' : ''}${p.strokes + 1}打目`;
-    $('hSub').textContent = `残り ${fy(dist(p.pos, G.course.pin))}yd・${lie}から`;
-    if (lie === '絨毯') banner('ラフです', '絨毯の上から打ってください', 3000);
+    $('hSub').textContent = `残り ${fy(dist(p.pos, G.course.pin))}yd`;
+    $('hLie').textContent = lie === '絨毯' ? 'ラフ:絨毯から打つ' : 'マットから打つ';
+    if (lie === '絨毯') banner('ラフ', '絨毯の上から打ってください', 3000);
     else if (G.players.length > 1) banner(`${p.name} の番`, `${lie}から打ってください`, 2200);
     renderCourse(); sendInfo();
   }
@@ -928,24 +1093,27 @@ const App = (() => {
   $('aimRoute').onclick = () => {
     if (!G || G.mode !== 'course' || G.busy) return;
     const p = G.players[G.cur], pin = G.course.pin, dp = dist(p.pos, pin);
-    const r = G.course.route.find(rp => dist(rp, pin) < dp - 3 && dist(p.pos, rp) > 4);
-    G.aim = headingTo(p.pos, r || pin); World.setAim(p.pos, G.aim, limitM());
+    const cands = G.course.route.filter(rp => dist(rp, pin) < dp - 3 && dist(p.pos, rp) > 4);
+    if (!cands.length) { G.aim = headingTo(p.pos, pin); }
+    else { const r = cands[routeIdx % cands.length]; routeIdx++; G.aim = headingTo(p.pos, r); }
+    World.setAim(p.pos, G.aim, limitM());
   };
   function afterCourse(p, res) {
-    const par = G.course.par; let msg = '', sub = '', kind = '';
-    if (res.hazard) { p.strokes += 2; msg = res.hazard === 'water' ? '池ポチャ' : '崖から落下'; sub = '1打罰・元の場所から打ち直し'; kind = 'ペナルティ'; }
-    else if (res.total >= limitM() - 1e-6) { p.strokes += 2; msg = '上限オーバー'; sub = `総距離 ${fy(res.total)}ヤード・1打罰・元の場所から打ち直し`; kind = '上限オーバー'; }
+    const par = G.course.par; let msg = '', sub = '', kind = '', tone = '';
+    if (res.hazard) { p.strokes += 2; msg = res.hazard === 'water' ? '池ポチャ' : '崖から落下'; sub = '1打罰・元の場所から打ち直し'; kind = 'ペナルティ'; tone = 'bad'; }
+    else if (res.total >= limitM() - 1e-6) { p.strokes += 2; msg = '上限オーバー'; sub = `総距離 ${fy(res.total)}ヤード・1打罰・元の場所から打ち直し`; kind = '上限オーバー'; tone = 'bad'; }
     else {
       p.strokes += 1; p.pos = { x: res.end.x, z: res.end.z };
-      if (res.holed) { p.done = true; p.score = p.strokes; msg = 'カップイン!'; kind = 'カップイン'; }
-      else if (res.toPin <= 2) { p.done = true; p.score = p.strokes + 1; msg = 'OK!'; sub = `ピンまで ${fDist(res.toPin)}・+1打で上がり`; kind = 'OK'; }
-      else { const z = SIM.zoneAt(G.course, p.pos.x, p.pos.z); msg = `残り ${fy(res.toPin)}ヤード`; sub = z === 'rough' ? 'ラフ:次は絨毯から' : z === 'green' ? 'グリーン' : 'フェアウェイ'; kind = z === 'rough' ? 'ラフ' : z === 'green' ? 'グリーン' : 'フェアウェイ'; }
+      if (res.holed) { p.done = true; p.score = p.strokes; msg = 'カップイン!'; kind = 'カップイン'; tone = 'good'; }
+      else if (res.toPin <= 2) { p.done = true; p.score = p.strokes + 1; msg = 'OK!'; sub = `ピンまで ${fDist(res.toPin)}・+1打で上がり`; kind = 'OK'; tone = 'good'; }
+      else { const z = SIM.zoneAt(G.course, p.pos.x, p.pos.z); msg = `残り ${fy(res.toPin)}ヤード`; const island = G.course.shapes.some(s => s.island && SIM.inShape(s, p.pos.x, p.pos.z)); sub = island ? 'ナイス!浮島にオン' : z === 'rough' ? 'ラフ:次は絨毯から' : z === 'green' ? 'グリーン' : z === 'fringe' ? 'カラー' : 'フェアウェイ'; kind = island ? '浮島' : z === 'rough' ? 'ラフ' : z === 'green' ? 'グリーン' : 'フェアウェイ'; if (island) tone = 'good'; }
     }
-    if (!p.done && p.strokes >= 2 * par) { p.done = true; p.gaveUp = true; p.score = 2 * par; msg = 'ギブアップ'; sub = `ダブルパー(${2 * par}打)で打ち切り`; }
+    if (!p.done && p.strokes >= 2 * par) { p.done = true; p.gaveUp = true; p.score = 2 * par; msg = 'ギブアップ'; sub = `ダブルパー(${2 * par}打)で打ち切り`; tone = 'bad'; }
     if (p.done && p.score > 2 * par) p.score = 2 * par;
-    p.log.push({ n: p.strokes, total: res.total, toPin: res.hazard ? null : res.toPin, kind });
-    banner(msg, sub, 2600);
-    if (!res.hazard && p.pos) World.addMarker(res.end.x, res.end.z, p.color);
+    p.log.push({ n: p.strokes, total: res.total, kind });
+    banner(msg, sub, 2600, tone);
+    if (tone === 'good') Sound.good(); else if (tone === 'bad') Sound.bad();
+    if (!res.hazard && res.total < limitM()) World.addMarker(res.end.x, res.end.z, p.color);
     renderCourse();
     setTimeout(() => { if (G && G.mode === 'course') beginTurn(); }, 2700);
   }
@@ -962,20 +1130,22 @@ const App = (() => {
     });
     const t = $('courseLog'); t.textContent = '';
     const hr = el('tr'); ['', '打数', '総距離', '結果'].forEach((h, i) => hr.append(el('th', i ? 'n' : null, h))); t.append(hr);
-    const rows = []; G.players.forEach(p => p.log.forEach((l, k) => rows.push({ p, l, k })));
-    if (!rows.length) { const r = el('tr'); const c = el('td', 'empty', '狙いを決めて、iPhoneの「打ってOK」を確認して打ちましょう。'); c.colSpan = 4; r.append(c); t.append(r); }
-    rows.reverse().forEach(({ p, l }) => { const r = el('tr'); r.append(el('td', null, p.name), el('td', 'n', String(l.n)), el('td', 'n', fy(l.total) + 'yd'), el('td', 'n' + (l.kind === 'ペナルティ' || l.kind === '上限オーバー' ? ' bad' : l.kind === 'OK' || l.kind === 'カップイン' ? ' good' : ''), l.kind)); t.append(r); });
+    const rows = []; G.players.forEach(p => p.log.forEach(l => rows.push({ p, l })));
+    if (!rows.length) { const r = el('tr'); const c = el('td', 'empty', '狙いを決めて、画面に「打ってOK」が出たら打ちましょう。'); c.colSpan = 4; r.append(c); t.append(r); }
+    rows.reverse().forEach(({ p, l }) => { const r = el('tr'); r.append(el('td', null, p.name), el('td', 'n', String(l.n)), el('td', 'n', fy(l.total) + 'yd'), el('td', 'n' + (l.kind === 'ペナルティ' || l.kind === '上限オーバー' ? ' bad' : ['OK', 'カップイン', '浮島'].includes(l.kind) ? ' good' : ''), l.kind)); t.append(r); });
   }
   function finishHole() {
     G.busy = true; World.hideAim(); World.setBalls([]);
     const par = G.course.par, ps = G.players;
     const tb = $('resTable'); tb.textContent = '';
     const best = Math.min(...ps.map(p => p.score));
-    const hr = el('tr'); ['', '打数', ''].forEach((h, i) => hr.append(el('th', i === 1 ? 'n' : null, h))); tb.append(hr);
+    const hr = el('tr'); ['プレイヤー', '打数', '結果'].forEach((h, i) => hr.append(el('th', i === 1 ? 'n' : null, h))); tb.append(hr);
     ps.forEach(p => { const r = el('tr', ps.length > 1 && p.score === best ? 'win' : null); r.append(el('td', null, p.name), el('td', 'n', String(p.score)), el('td', null, (p.gaveUp ? 'ギブアップ ' : '') + scoreName(p.score, par))); tb.append(r); });
+    $('resKicker').textContent = `${G.course.name}・PAR ${par}`;
     if (ps.length > 1) { const w = ps.filter(p => p.score === best); $('resTitle').textContent = w.length > 1 ? '引き分け' : `${w[0].name} の勝ち`; }
-    else $('resTitle').textContent = `ホールアウト:${scoreName(ps[0].score, par)}`;
+    else $('resTitle').textContent = scoreName(ps[0].score, par);
     $('resultBox').hidden = false; $('banner').hidden = true;
+    if (best <= par) Sound.good();
     sendInfo();
   }
   $('resAgain').onclick = () => startCourse(lastCourseId);
@@ -994,11 +1164,11 @@ const App = (() => {
     if (G.busy || World.busy()) { toast('前の打球を表示中です'); return; }
     G.busy = true; showShotStart(s);
     if (G.mode === 'free') {
-      const res = SIM.simulate(s, G.course, G.course.tee, 0);
-      World.play(res, '#ffffff', () => { showShotEnd(res); afterFree(res); });
+      const res = simulate(s, G.course, G.course.tee, 0);
+      World.play(res, '#ffe38a', () => { showShotEnd(res); afterFree(res); });
     } else {
       const p = G.players[G.cur];
-      const res = SIM.simulate(s, G.course, p.pos, G.aim);
+      const res = simulate(s, G.course, p.pos, G.aim);
       World.play(res, p.color, () => { showShotEnd(res); afterCourse(p, res); });
     }
   }
@@ -1012,11 +1182,14 @@ const App = (() => {
     }
   }
   const READY_TEXT = { off: 'カメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中…' };
-  const HOME_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'iPhone:ボールを置いてください', ready: 'iPhone:打ってOK', track: 'iPhone:計測中' };
+  const HOME_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中' };
   function setReady(s) {
-    readyState = s;
+    const was = readyState; readyState = s;
     $('readyMark').dataset.state = s; $('readyText').textContent = READY_TEXT[s] || '';
+    $('world').dataset.ready = s;
     $('homeReady').dataset.state = s; $('homeReadyText').textContent = HOME_TEXT[s] || '';
+    $('gs2').classList.toggle('done', paired && s !== 'off');
+    if (s === 'ready' && was !== 'ready' && !$('playView').hidden) Sound.ready();
   }
   function sendInfo() {
     let next = '', lie = '';
@@ -1024,11 +1197,10 @@ const App = (() => {
     else if (G && G.mode === 'free') lie = 'マット';
     Net.send({ type: 'info', next, lie });
   }
-  // test shot
   const tfmt = { tSpeed: v => v + ' m/s', tAngle: v => v + '°', tSpin: v => v + ' rpm' };
   Object.keys(tfmt).forEach(k => { const e = $(k), o = $('o' + k); const u = () => { o.textContent = tfmt[k](+e.value); }; e.oninput = u; u(); });
   $('testShot').onclick = () => onShot({ id: 't' + Date.now() + Math.random(), speed: +$('tSpeed').value, angle: +$('tAngle').value, dir: 0, spin: +$('tSpin').value });
-  return { initHome, onMessage, setReady, sendInfo };
+  return { initHome, onMessage, setReady, setPaired, sendInfo };
 })();
 
 /* ---------------- boot ---------------- */
