@@ -399,7 +399,88 @@ const DTL = (() => {
     const S = () => opt();
     const roiBox = () => { const R = Math.max(10, Math.ceil(tee.r * 3)); return [Math.round(tee.x - R), Math.round(tee.y - R), 2 * R, 2 * R]; };
 
-    // ---- 置き場所の登録:ボールをタップ → ボールがなくなって落ち着いたら背景を覚え、ボールの丸を測る ----
+    // ---- タップしたボールを、その場で測ってすぐ「打ってOK」にする ----
+    // タップした点のまわりで、輪郭(明るさ・色の変わり目)がいちばん強く一周している丸を探す
+    function measureAt(fr, x, y, rHint, rLo, rHi) {
+      const big = Math.round(Math.min(fr.W, fr.H) * 0.07), R = fr.roi(Math.round(x - big), Math.round(y - big), 2 * big, 2 * big);
+      const { d, w, h } = R, cx0 = x - R.x, cy0 = y - R.y;
+      const px = (X, Y, c) => { X = Math.max(0, Math.min(w - 1, X)); Y = Math.max(0, Math.min(h - 1, Y)); const x0 = Math.floor(X), y0 = Math.floor(Y), fx = X - x0, fy = Y - y0, x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+        const g = (xx, yy) => d[(yy * w + xx) * 4 + c]; return (g(x0, y0) * (1 - fx) + g(x1, y0) * fx) * (1 - fy) + (g(x0, y1) * (1 - fx) + g(x1, y1) * fx) * fy; };
+      const edge = (cx, cy, r) => { let s = 0; for (let a = 0; a < 40; a++) { const t = a / 40 * 2 * Math.PI, c = Math.cos(t), sn = Math.sin(t); let e = 0; for (let ch = 0; ch < 3; ch++) { const ro = r + Math.max(1.5, 0.18 * r), ri = r - Math.max(1.5, 0.18 * r); e += Math.abs(px(cx + c * ro, cy + sn * ro, ch) - px(cx + c * ri, cy + sn * ri, ch)); } s += Math.min(e, 200); } return s / 40; };
+      const rMin = Math.max(4, rLo || 5), rMax = Math.min(Math.max(8, big * 0.85), rHi || 1e9);
+      let best = null; const perR = [];
+      for (let r = rMin; r <= rMax; r *= 1.08) {
+        let bR = null;
+        const st = Math.max(1, r / 4);
+        for (let dy = -r * 0.9; dy <= r * 0.9; dy += st) for (let dx = -r * 0.9; dx <= r * 0.9; dx += st) {
+          const cx = cx0 + dx, cy = cy0 + dy; if (Math.hypot(dx, dy) > r * 0.9) continue;
+          let sc = edge(cx, cy, r);
+          if (rHint) sc *= Math.exp(-Math.pow(Math.log(r / rHint) / 0.35, 2) / 2) * 0.5 + 0.5;   // 前に測った大きさに近いほど少し優先
+          if (!bR || sc > bR.sc) bR = { cx, cy, r, sc };
+        }
+        if (bR) perR.push(bR);
+      }
+      if (!perR.length) return null;
+      // ボールの中の境目や穴も小さな丸に見えるので、十分強い丸のうち一番外側(大きい方)をボールの輪郭とする
+      const top = Math.max(...perR.map(q => q.sc));
+      for (const q of perR) if (q.sc >= 0.92 * top && (!best || q.r > best.r)) best = q;
+      // 細かく詰める
+      for (let it = 0; it < 2; it++) { let b2 = best; for (const [dx, dy, dr] of [[0.5,0,0],[-0.5,0,0],[0,0.5,0],[0,-0.5,0],[0,0,0.5],[0,0,-0.5]]) { const sc = edge(best.cx + dx, best.cy + dy, best.r + dr); if (sc > b2.sc) b2 = { cx: best.cx + dx, cy: best.cy + dy, r: best.r + dr, sc }; } best = b2; }
+      return { x: best.cx + R.x, y: best.cy + R.y, r: best.r, score: best.sc };
+    }
+    // ボールの境目は縦にまっすぐ置く前提:タップした側の半球は「縦に直径ぶんの高さ、横に半径ぶんの幅」の半円に写る。
+    // タップした色と同じ色の広がりを塗りつぶしで求め、その高さから半径、まっすぐな辺から中心を出す
+    function measureHalf(fr, x, y) {
+      const big = Math.round(Math.min(fr.W, fr.H) * 0.07), R = fr.roi(Math.round(x - big), Math.round(y - big), 2 * big, 2 * big);
+      const { d, w, h } = R, sx = Math.round(x - R.x), sy = Math.round(y - R.y);
+      const cs = []; for (let yy = sy - 2; yy <= sy + 2; yy++) for (let xx = sx - 2; xx <= sx + 2; xx++) { if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue; const i = (yy * w + xx) * 4; cs.push([d[i], d[i + 1], d[i + 2]]); }
+      if (!cs.length) return null;
+      const med = [0, 1, 2].map(c => cs.map(q => q[c]).sort((a, b) => a - b)[cs.length >> 1]);
+      for (const tol of [70, 50, 35]) {
+        const m = new Uint8Array(w * h);
+        for (let k = 0; k < w * h; k++) { const i = k * 4; if (Math.abs(d[i] - med[0]) + Math.abs(d[i + 1] - med[1]) + Math.abs(d[i + 2] - med[2]) < tol) m[k] = 1; }
+        const cm = closeOpen(m, w, h);
+        const seen = new Uint8Array(w * h), q = [sy * w + sx]; if (!cm[q[0]]) { let f = -1; for (let r = 1; r < 4 && f < 0; r++) for (let dy = -r; dy <= r && f < 0; dy++) for (let dx = -r; dx <= r && f < 0; dx++) { const k = (sy + dy) * w + sx + dx; if (k >= 0 && k < w * h && cm[k]) f = k; } if (f < 0) continue; q[0] = f; }
+        seen[q[0]] = 1; let n = 0, touch = false; const L = new Map(), Rr = new Map();
+        while (q.length) {
+          const k = q.pop(), xx = k % w, yy = (k / w) | 0; n++;
+          if (xx === 0 || yy === 0 || xx === w - 1 || yy === h - 1) touch = true;
+          if (!L.has(yy) || xx < L.get(yy)) L.set(yy, xx); if (!Rr.has(yy) || xx > Rr.get(yy)) Rr.set(yy, xx);
+          for (const k2 of [k - 1, k + 1, k - w, k + w]) if (k2 >= 0 && k2 < w * h && cm[k2] && !seen[k2] && Math.abs((k2 % w) - xx) <= 1) { seen[k2] = 1; q.push(k2); }
+        }
+        if (touch || n < 20) continue;
+        const ys = [...L.keys()].sort((a, b) => a - b), y0 = ys[0], y1 = ys[ys.length - 1], r = (y1 - y0 + 1) / 2;
+        if (r < 4) continue;
+        // 半円のまっすぐな側(境目)を探す:各行の左端・右端のばらつきが小さい方
+        const mid = ys.filter(yy => Math.abs(yy - (y0 + y1) / 2) < r * 0.7);
+        const sd = (arr) => { const m0 = arr.reduce((a, b) => a + b, 0) / arr.length; return Math.sqrt(arr.reduce((a, b) => a + (b - m0) ** 2, 0) / arr.length); };
+        const Ls = mid.map(yy => L.get(yy)), Rs = mid.map(yy => Rr.get(yy)), wid = Math.max(...Rs) - Math.min(...Ls) + 1;
+        let cx;
+        if (wid > 1.5 * r) cx = (Math.min(...Ls) + Math.max(...Rs)) / 2;                 // 1色のボール(丸ごと)
+        else cx = sd(Ls) < sd(Rs) ? Ls.reduce((a, b) => a + b, 0) / Ls.length : Rs.reduce((a, b) => a + b, 0) / Rs.length + 1;
+        // 面積の確かめ:半円ならπr²/2、丸ごとならπr²
+        const exp = wid > 1.5 * r ? Math.PI * r * r : Math.PI * r * r / 2;
+        if (n < 0.45 * exp || n > 1.6 * exp) continue;
+        return { x: cx + R.x, y: (y0 + y1) / 2 + R.y, r, score: 100 };
+      }
+      return null;
+    }
+    function tapReady(fr, x, y, t) {
+      // 見込みの大きさ:前に測った大きさ、なければ距離と画角から(iPhoneの広角は縦向き1080px幅で焦点距離 約1440px)
+      const o = S(), fGuess = (o.fpx || 1440) * Math.min(fr.W, fr.H) / 1080, rGuess = fGuess * ((o.diamMM || 42) / 2000) / (o.dist || 1.8), rExp = tee && tee.r && Math.abs(tee.r - rGuess) < 0.5 * rGuess ? tee.r : rGuess;
+      const m = measureAt(fr, x, y, rExp, 0.7 * rExp, 1.45 * rExp);
+      if (!m || m.score < 25) return { ev: 'tapfail' };
+      tee = { x: m.x, y: m.y, r: m.r }; ball = { x: m.x, y: m.y, r: m.r };
+      const [bx, by, bw, bh] = roiBox(); const cur = fr.roi(bx, by, bw, bh);
+      const px = [], cx = ball.x - cur.x, cy = ball.y - cur.y; for (let yy = 0; yy < cur.h; yy++) for (let xx = 0; xx < cur.w; xx++) if (Math.hypot(xx - cx, yy - cy) < ball.r * 0.85) px.push(yy * cur.w + xx);
+      const bm = new Uint8Array(cur.w * cur.h); for (const k of px) bm[k] = 1;
+      pal = palette(cur, bm); seam0 = seamAngle(cur, px, pal);
+      readyRoi = cur; prevIn = null; grabRef(fr); state = 'ready'; quiet = 0; stable = 0; launchT = t || 0;
+      if (fr.small) scene = fr.small(); movedN = 0;
+      if (empty && (empty.w !== cur.w || empty.h !== cur.h)) empty = null;     // 置き場所の大きさが変わったら背景を覚え直す
+      return { ev: 'ready', ball: Object.assign({}, ball), tee: Object.assign({}, tee), issue: placeIssue(fr) };
+    }
+    // ---- (旧)置き場所の登録:ボールをタップ → ボールがなくなって落ち着いたら背景を覚える ----
     function tap(fr, x, y) {
       const R = Math.round(Math.min(fr.W, fr.H) * 0.06);
       tee = { x, y, r: 0, R };
@@ -741,7 +822,7 @@ const DTL = (() => {
       return res;
     }
     return {
-      feed, tap, useStored,
+      feed, tap, tapReady, useStored,
       reset() { state = tee ? 'clear' : 'setup'; quiet = 0; },
       get state() { return state; }, get tee() { return tee; }, get ball() { return ball; }, get obs() { return obs; },
       get cand() { return state === 'wait' ? cand : null; }, get progress() { return state === 'wait' ? Math.min(1, stable / READY_FRAMES) : state === 'ready' || state === 'armed' ? 1 : 0; },
@@ -978,11 +1059,11 @@ const Cam = (() => {
   // ---- 状態の表示 ----
   const TEXT = {
     off: ['カメラを開始してください', 'ボールの真後ろ1.8m・床に近い低い位置に、iPhoneを縦向きで置きます'],
-    setup: ['ボールをタップ', 'ボールを置き場所に置いて、映像の中のボールを1回タップしてください'],
+    setup: ['ボールをタップ', 'ボールを置いて、映像の中のボールをタップすると、すぐ「打ってOK」になります'],
     remove: ['ボールをどけてください', '何もない置き場所を覚えます。ボールを手でどけて、少し待ってください(そのまま1球打ってもOK)'],
     moved: ['カメラが動いています', '三脚などに固定してください。止まると再開します'],
     clear: ['置き場所を確認中', 'ボールがない状態で少し待ってください'],
-    wait: ['ボールを置いてください', '黄色の丸の所に置くと自動で見つけます。丸の位置が違うときは、映像のボールをタップ'],
+    wait: ['ボールを置いてください', '置いたら映像のボールをタップ(点線の丸の所に置けば自動でも見つけます)'],
     ready: ['打ってOK', ''],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
@@ -1034,8 +1115,11 @@ const Cam = (() => {
   function small() { const w = VW > VH ? 40 : 24, h = VW > VH ? 24 : 40; tiny.width = w; tiny.height = h; tctx.drawImage(vid, 0, 0, w, h); return { d: tctx.getImageData(0, 0, w, h).data, w, h }; }
   const frameObj = { get W() { return VW; }, get H() { return VH; }, roi, small };
   const teeKey = () => `tee_${facing}_${VW}x${VH}`;
+  // 測ったボールの大きさから、カメラの焦点距離(画面の縦向き1080px幅あたり)を覚える。次のタップの見込みに使う
+  const fKey = () => 'fpx_' + facing;
+  function learnF(b) { if (!b || !b.r || !VW) return; const f = (2 * b.r) * S.dist / (S.diam / 1000) * 1080 / Math.min(VW, VH); if (f > 500 && f < 4000) { const old = store.get(fKey(), null); store.set(fKey(), old ? old * 0.7 + f * 0.3 : f); } }
   function newSession() {
-    sess = DTL.session(() => ({ dist: S.dist, diamMM: S.diam, massG: S.mass, cor: S.cor, attack: S.attack, drag: S.drag, sens: S.sens, up: upCam(), maxObs: 100, maxT: 1.6 }));
+    sess = DTL.session(() => ({ fpx: store.get(fKey(), null), dist: S.dist, diamMM: S.diam, massG: S.mass, cor: S.cor, attack: S.attack, drag: S.drag, sens: S.sens, up: upCam(), maxObs: 100, maxT: 1.6 }));
     const t = store.get(teeKey(), null);
     if (t && t.r > 2) { sess.useStored(t); setState('clear'); } else setState('setup');
   }
@@ -1115,7 +1199,9 @@ const Cam = (() => {
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    sess.tap(frameObj, nx * VW, ny * VH); setState('remove');
+    const ev = sess.tapReady(frameObj, nx * VW, ny * VH, performance.now() / 1000);
+    if (ev.ev === 'ready') { learnF(ev.ball); store.set(teeKey(), Object.assign({}, ev.tee)); issue = VW > VH ? 'landscape' : ev.issue || null; lastTouch = Date.now(); setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
+    else toast('ボールが見つかりませんでした。ボールの真ん中をタップしてください');
   });
 
   // ---- 結果 ----
@@ -1173,7 +1259,7 @@ const Cam = (() => {
     if (ss === 'setup') {
       octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(0, H - 44 * dpr, W, 44 * dpr);
       octx.fillStyle = '#fff'; octx.font = `${15 * dpr}px sans-serif`; octx.textAlign = 'center';
-      octx.fillText('置き場所に置いたボールをタップしてください', W / 2, H - 16 * dpr);
+      octx.fillText('映像のボールをタップしてください', W / 2, H - 16 * dpr);
     }
   }
 
@@ -1188,6 +1274,7 @@ const Cam = (() => {
       if (ev.ev === 'teeset' || ev.ev === 'empty') { const tt = Object.assign({}, sess.tee, { thumb: ev.thumb || (ev.tee && ev.tee.thumb) || sess.thumb }); store.set(teeKey(), tt); }
       if (ev.ev === 'teeset') toast('置き場所を覚えました');
       if (ev.ev === 'ready') {
+        learnF(ev.ball);
         issue = VW > VH ? 'landscape' : ev.issue || null;
         if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
       } else if (ev.ev === 'result') onResult(ev.res);
