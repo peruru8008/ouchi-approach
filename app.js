@@ -753,6 +753,9 @@ const DTL = (() => {
 
 
 const $ = (id) => document.getElementById(id);
+// 予期しないエラーは画面に短く出す(原因を調べるため。外部には送らない)
+window.addEventListener('error', (e) => { try { toast('エラー:' + String(e.message || '').slice(0, 100)); } catch (x) {} });
+window.addEventListener('unhandledrejection', (e) => { try { toast('エラー:' + String((e.reason && e.reason.message) || e.reason || '').slice(0, 100)); } catch (x) {} });
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const YD = 0.9144;
 const yd = (m) => m / YD;
@@ -1037,13 +1040,23 @@ const Cam = (() => {
     if (t && t.r > 2) { sess.useStored(t); setState('clear'); } else setState('setup');
   }
 
+  // 条件をゆるめながら順に試す(カメラによっては高い設定を受け付けない)
+  async function getCam(list) {
+    let last = null;
+    for (const c of list) { try { return await navigator.mediaDevices.getUserMedia(c); } catch (e) { last = e; if (e && e.name === 'NotAllowedError') break; } }
+    throw last;
+  }
   async function start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('このブラウザではカメラを使えません(Safariで開いてください)'); return; }
     // 「カメラを開始」を押したときに、まず傾きセンサーの許可を聞き、そのあとカメラの許可を聞く(2つの確認が重ならないように)
     const motionOK0 = await askMotion();
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } } });
-    } catch (e) { setState('error', 'カメラの使用が許可されませんでした。設定 → Safari → カメラ を確認してください'); return; }
+      stream = await getCam([
+        { audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } } },
+        { audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } } },
+        { audio: false, video: { facingMode: facing } }
+      ]);
+    } catch (e) { setState('error', `カメラを開けませんでした(${e && e.name || ''})。設定 → Safari → カメラ を確認してください`); return; }
     vid.srcObject = stream;
     try { await vid.play(); } catch (e) {}
     await new Promise(r => { if (vid.videoWidth) r(); else vid.onloadedmetadata = () => r(); });
@@ -1067,7 +1080,11 @@ const Cam = (() => {
   $('camStart').onclick = start;
   // 外カメラ/インカメラの切り替え
   const showFacing = () => { $('camFlip').textContent = facing === 'user' ? '外カメラに切り替え' : 'インカメラに切り替え'; };
-  $('camFlip').onclick = async () => { facing = facing === 'user' ? 'environment' : 'user'; store.set('facing', facing); showFacing(); if (running) { stop(); await start(); } };
+  $('camFlip').onclick = async () => {
+    facing = facing === 'user' ? 'environment' : 'user'; store.set('facing', facing); showFacing();
+    if (running) { stop(); await new Promise(r => setTimeout(r, 300)); await start(); }
+    else toast(facing === 'user' ? 'インカメラを使います。「カメラを開始」を押してください' : '外カメラを使います。「カメラを開始」を押してください');
+  };
   showFacing();
   $('camStop').onclick = () => stop();
   $('reTee').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } store.set(teeKey(), null); newSession(); setDark(false); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
@@ -1091,7 +1108,7 @@ const Cam = (() => {
     if (va > ca) { const h = W / va; return { x: 0, y: (H - h) / 2, w: W, h }; }
     const w = H * va; return { x: (W - w) / 2, y: 0, w, h: H };
   }
-  ov.addEventListener('click', (e) => {
+  ov.addEventListener('pointerup', (e) => {
     // 映像のボールをタップすると、いつでも置き場所を登録し直せる(計測中を除く)
     if (!running || !sess || !VW || sess.state === 'track' || sess.state === 'armed') return;
     drawOverlay();                                       // 重ね絵の大きさを画面に合わせてから位置を計算する
@@ -1181,13 +1198,19 @@ const Cam = (() => {
     else if (sess.state === 'wait' && state === 'ready') setState('wait');
     if (!dark) drawOverlay();
   }
+  // 1コマの処理でエラーが出ても止まらないようにし、内容を画面に出す(原因を調べるため)
+  let errShown = 0;
+  function safeFrame(t) {
+    try { frame(t); }
+    catch (e) { if (Date.now() - errShown > 3000) { errShown = Date.now(); $('stateSub').textContent = 'エラー:' + String(e && e.message || e).slice(0, 120); } }
+  }
   function loop() {
     if (!running) return;
     if ('requestVideoFrameCallback' in vid) {
-      const cb = (now, meta) => { if (!running) return; const ms = meta && (meta.captureTime || meta.presentationTime || now); frame(ms / 1000); vid.requestVideoFrameCallback(cb); };
+      const cb = (now, meta) => { if (!running) return; const ms = meta && (meta.captureTime || meta.presentationTime || now); safeFrame(ms / 1000); vid.requestVideoFrameCallback(cb); };
       vid.requestVideoFrameCallback(cb);
     } else {
-      const cb = (now) => { if (!running) return; frame(now / 1000); requestAnimationFrame(cb); };
+      const cb = (now) => { if (!running) return; safeFrame(now / 1000); requestAnimationFrame(cb); };
       requestAnimationFrame(cb);
     }
   }

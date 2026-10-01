@@ -280,3 +280,4 @@ table.log td.n{white-space:nowrap}
 .lie{display:flex;gap:6px}
 .lie button{flex:1;border:1px solid var(--rule);background:#fff;border-radius:8px;padding:8px 6px;font:inherit;font-weight:700;color:var(--ink2)}
 .lie button[aria-pressed="true"]{background:var(--ink);color:#fff;border-color:var(--ink)}
+.ver{display:inline-block;margin-left:6px;opacity:.6;font-size:12px}
