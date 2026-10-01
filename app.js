@@ -946,7 +946,8 @@ const Cam = (() => {
 
   async function start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('このブラウザではカメラを使えません(Safariで開いてください)'); return; }
-    const motionP = askMotion();                         // 「カメラを開始」を押したときに、傾きセンサーの許可も聞く
+    // 「カメラを開始」を押したときに、まず傾きセンサーの許可を聞き、そのあとカメラの許可を聞く(2つの確認が重ならないように)
+    const motionOK0 = await askMotion();
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } } });
     } catch (e) { setState('error', 'カメラの使用が許可されませんでした。設定 → Safari → カメラ を確認してください'); return; }
@@ -955,7 +956,7 @@ const Cam = (() => {
     await new Promise(r => { if (vid.videoWidth) r(); else vid.onloadedmetadata = () => r(); });
     VW = vid.videoWidth; VH = vid.videoHeight; $('stage').style.aspectRatio = VW + ' / ' + VH;
     $('stageEmpty').hidden = true;
-    if (!(await motionP)) toast('傾きセンサーを使えないため、iPhoneは水平として計算します');
+    if (!motionOK0) toast('傾きセンサーを使えないため、iPhoneは水平として計算します');
     try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) { wake = null; }
     running = true; lastTouch = lastActive = Date.now(); setButtons();
     newSession(); loop();
@@ -994,7 +995,8 @@ const Cam = (() => {
     const w = H * va; return { x: (W - w) / 2, y: 0, w, h: H };
   }
   ov.addEventListener('click', (e) => {
-    if (!running || !sess || sess.state !== 'setup') return;
+    if (!running || !sess || sess.state !== 'setup' || !VW) return;
+    drawOverlay();                                       // 重ね絵の大きさを画面に合わせてから位置を計算する
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
