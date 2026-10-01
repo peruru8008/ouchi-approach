@@ -5,16 +5,99 @@
    - 端末間で送るのは数値と状態だけ(WebRTCで暗号化された直接通信。データを中継するサーバーは使わない)
    - 受け取ったデータは種類・数値範囲・大きさを検査してから使い、画面にはテキストとしてのみ表示する */
 (() => {
-// ===== ball physics (real golf ball equivalent, 56° wedge) =====
-const SIM = (() => {
-  const G = 9.81, RHO = 1.2, R = 0.02135, M = 0.04593, A = Math.PI * R * R;
-  const CUP_R = 0.054;
-  const SURF = {
-    green:   { e: 0.42, mu: 0.40, muk: 0.35, dig: 0.055 },
-    fringe:  { e: 0.32, mu: 0.52, muk: 0.48, dig: 0.08, decel: 1.6 },
-    fairway: { e: 0.30, mu: 0.55, muk: 0.50, dig: 0.085, decel: 1.9 },
-    rough:   { e: 0.16, mu: 0.70, muk: 0.72, dig: 0.13, decel: 4.2 }
+// ===== おうちアプローチ 物理エンジン v3 =====
+// 1) IMPACT: 練習球の打ち出し(速さ・角度)から、クラブ速度とスピンロフトを逆算し、本物のボールの打ち出しを衝突の物理で求める
+// 2) SIM: スピン比に応じた揚力・抗力で飛ばし、Penner(2002)のバウンドモデルで着地させ、芝の上を滑り/転がりで止める
+const PHYS = (() => {
+  const G = 9.81, RHO = 1.2;
+  const BALL = { m: 0.04593, r: 0.02135, k: 2.5 };          // 本物のボール。k = m r^2 / I(中実球 I=2/5 m r^2)
+  const deg = Math.PI / 180;
+
+  /* ---------- 空気力学 ---------- */
+  // S = r*ω/v(スピン比)。ウェッジ域の高スピンでは揚力が頭打ちになる形にする
+  // ディンプルのあるボールは、レイノルズ数が約5万を下回ると抵抗が急に増える(ドラッグクライシス)。アプローチの球速域で効く
+  const AERO = { cd0: 0.22, cd1: 0.25, clMax: 0.34, clK: 5, crisis: 0.22, reC: 5.0e4, reW: 4.0e3 };
+  const NU = 1.5e-5;                                           // 空気の動粘性係数 [m^2/s]
+  function coeffs(v, w, P) {
+    P = P || PROFILES.real;
+    const S = v > 0.5 ? P.r * Math.abs(w) / v : 0;
+    const Re = v * 2 * P.r / NU;
+    if (P.kind === 'plastic') {
+      // 穴あきの練習ボール:ウィッフルボールの風洞実験(Cd が低速で約1、高速で0.4〜0.6)に合わせる。揚力は穴で弱まる
+      const cd = P.cdScale * (0.5 + 0.45 / (1 + (Re / 2.5e4) ** 2));
+      const cl = P.clMax * (1 - Math.exp(-2.5 * S / P.clMax)) * Math.sign(w);
+      return { cd, cl, S, Re };
+    }
+    const cl = AERO.clMax * (1 - Math.exp(-AERO.clK * S / AERO.clMax * 0.5)) * Math.sign(w);
+    const cd = AERO.cd0 + AERO.cd1 * Math.min(S, 0.8) + AERO.crisis / (1 + Math.exp((Re - AERO.reC) / AERO.reW));
+    return { cd, cl, S, Re };
+  }
+  // ボールの種類。spinTau はスピンが減る時定数(慣性モーメントが小さい軽い球ほど早く減る)
+  const PROFILES = {
+    real: { kind: 'real', m: 0.04593, r: 0.02135, k: 2.5, spinTau: 22, crater: 1, eS: 1 },
+    plastic: null
   };
+  function plasticProfile(o) {
+    const m = clamp01((o && o.massG ? o.massG : 5), 1, 30) / 1000, r = clamp01((o && o.diamMM ? o.diamMM : 42), 30, 80) / 2000;
+    // 中空の殻:I = 2/3 m r^2。スピンの減り方は I に比例してはやくなる
+    const tau = 22 * ((2 / 3) * m * r * r) / (0.4 * 0.04593 * 0.02135 * 0.02135);
+    // rollMul:軽い穴あき球は芝の上で本物より早く止まる(転がり抵抗の倍率)
+    return { kind: 'plastic', m, r, k: 1.5, spinTau: Math.max(1, tau), cdScale: (o && o.dragScale) || 1, clMax: 0.18, crater: 0.45, eS: 0.9, rollMul: (o && o.rollMul) || 3 };
+  }
+  function clamp01(v, a, b) { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(b, v)) : a; }
+  PROFILES.plastic = plasticProfile();
+
+  /* ---------- インパクト(衝突) ---------- */
+  const CLUB = { M: 0.29 };                                  // 56度ウェッジのヘッドの有効質量 [kg]
+  const REAL = { m: BALL.m, r: BALL.r, k: BALL.k, mu: 0.40, e: (vn) => Math.max(0.70, Math.min(0.86, 0.885 - 0.0050 * vn)), ks: 1.37 };   // ks: 剛体モデルが実測よりスピンを少なく出す分の補正(ツアー平均で合わせた値)
+  // 練習球:中空のプラスチック球(I=2/3 m r^2 → k=1.5)。重さと反発係数は設定で変えられる
+  function plasticBall(o) { return { m: (o && o.massG ? o.massG : 5) / 1000, r: (o && o.diamMM ? o.diamMM : 42) / 2000, k: 1.5, mu: 0.35, e: () => (o && o.cor ? o.cor : 0.55) }; }
+  // クラブ速度1あたりの、ボールの法線速度・接線速度・スピン(スピンロフトSの面に対して)
+  function impactUnit(b, S, v) {
+    const vnGuess = 1.5 * v * Math.cos(S);
+    const e = b.e(vnGuess);
+    const cn = (1 + e) * CLUB.M / (CLUB.M + b.m);
+    const ctRoll = 1 / (1 + b.k + b.m / CLUB.M);
+    const vn = cn * Math.cos(S);
+    let vt = ctRoll * Math.sin(S);
+    if (vt > b.mu * vn) vt = b.mu * vn;                       // 摩擦が足りなければ滑ったまま離れる
+    return { vn, vt, beta: Math.atan2(vt, vn), speed: Math.hypot(vn, vt), w: vt * b.k / b.r };
+  }
+  // 本物のボールを、クラブ速度v・スピンロフトS・入射角(アタック角)aで打ったとき
+  function realLaunch(v, S, a) {
+    const u = impactUnit(REAL, S, v);
+    const ks = REAL.ks;
+    return { speed: u.speed * v, angle: (a + S - u.beta) / deg, spin: ks * u.w * v * 60 / (2 * Math.PI), smash: u.speed };
+  }
+  // 練習球の計測値(速さup m/s、角度thetaP度)から逆算
+  function convert(up, thetaP, opts) {
+    const a = (opts && opts.attack != null ? opts.attack : -3) * deg;
+    const pb = plasticBall(opts);
+    const target = thetaP * deg - a;                          // = S - beta_p(S)
+    let lo = Math.max(0.5 * deg, target), hi = 85 * deg;
+    for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; const u = impactUnit(pb, mid, 10); if (mid - u.beta < target) lo = mid; else hi = mid; }
+    const S = (lo + hi) / 2;
+    let v = up / impactUnit(pb, S, 10).speed;
+    for (let i = 0; i < 3; i++) v = up / impactUnit(pb, S, v).speed;
+    const r = realLaunch(v, S, a);
+    return { clubSpeed: v, spinLoft: S / deg, speed: r.speed, angle: r.angle, spin: r.spin, smash: r.smash };
+  }
+
+  // 練習ボールの計測値から、クラブ速度・スピンロフト・練習ボールのスピンを推定する(本物への換算はしない)
+  function plasticLaunch(up, thetaP, opts) {
+    const a = (opts && opts.attack != null ? opts.attack : -3) * deg;
+    const pb = plasticBall(opts);
+    const target = thetaP * deg - a;
+    let lo = Math.max(0.5 * deg, target), hi = 85 * deg;
+    for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; const u = impactUnit(pb, mid, 10); if (mid - u.beta < target) lo = mid; else hi = mid; }
+    const S = (lo + hi) / 2;
+    let v = up / impactUnit(pb, S, 10).speed;
+    for (let i = 0; i < 3; i++) v = up / impactUnit(pb, S, v).speed;
+    const u = impactUnit(pb, S, v);
+    return { clubSpeed: v, spinLoft: S / deg, speed: up, angle: thetaP, spin: u.w * v * 60 / (2 * Math.PI) };
+  }
+
+  /* ---------- コース面 ---------- */
   const inEll = (s, x, z, grow) => { const dx = (x - s.cx) / (s.rx + (grow || 0)), dz = (z - s.cz) / (s.rz + (grow || 0)); return dx * dx + dz * dz <= 1; };
   const inRect = (s, x, z) => x >= s.x0 && x <= s.x1 && z >= s.z0 && z <= s.z1;
   function inPoly(p, x, z) { let c = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) { const [xi, zi] = p[i], [xj, zj] = p[j]; if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) c = !c; } return c; }
@@ -24,298 +107,562 @@ const SIM = (() => {
     for (const s of c.shapes) if (s.type === 'green' && inShape(s, x, z)) return 'green';
     for (const s of c.shapes) if (s.top && inShape(s, x, z)) return s.type;
     for (const s of c.shapes) if ((s.type === 'chasm' || s.type === 'water') && inShape(s, x, z)) return s.type;
-    for (const s of c.shapes) if (s.type === 'green' && inShape(s, x, z, 1.2)) return 'fringe';
+    for (const s of c.shapes) if (s.type === 'green' && inShape(s, x, z, 1.2 * (c.scale || 1))) return 'fringe';
     for (const s of c.shapes) if (s.type === 'fairway' && inShape(s, x, z)) return 'fairway';
     return 'rough';
   }
+  // crater: 着地のくぼみの深さ(Penner角の倍率)、eS: 反発の倍率、mu: 着地時の摩擦、slide: 転がり始めるまでの滑り摩擦、decel: 転がり抵抗[m/s^2]
+  const SURF = {
+    green:   { crater: 1.0, eS: 1.0,  mu: 0.43, slide: 0.30 },
+    fringe:  { crater: 1.25, eS: 0.9, mu: 0.45, slide: 0.35, decel: 1.3 },
+    fairway: { crater: 1.35, eS: 0.85, mu: 0.45, slide: 0.38, decel: 1.7 },
+    rough:   { crater: 2.2, eS: 0.5,  mu: 0.55, slide: 0.65, decel: 4.5 }
+  };
+  const decelOf = (c, zone, P) => (zone === 'green' ? 5.49 / c.stimp : SURF[zone].decel) * ((P && P.rollMul) || 1);
   const isHaz = (z) => z === 'water' || z === 'chasm';
-  function rollDecel(c, zone) { return zone === 'green' ? 5.49 / c.stimp : SURF[zone].decel; }
-  // shot: {speed m/s, angle deg, dir deg(+右), spin rpm}; start {x,z}; heading rad (0 = +x)
-  function simulate(shot, c, start, heading) {
-    const dt = 1 / 240;
-    const th = shot.angle * Math.PI / 180, ph = heading + shot.dir * Math.PI / 180;
-    const hx0 = Math.cos(ph), hz0 = Math.sin(ph);
-    let p = [start.x, 0, start.z];
-    let v = [shot.speed * Math.cos(th) * hx0, shot.speed * Math.sin(th), shot.speed * Math.cos(th) * hz0];
-    let w = shot.spin * 2 * Math.PI / 60;
-    const pts = [[0, p[0], p[1], p[2]]];
-    let t = 0, phase = 'air', carry = null, holed = false, hazard = null;
-    const cup = c.pin;
-    for (let i = 0; i < 240 * 30; i++) {
+
+  /* Penner(2002)のグリーン上のバウンド:
+     着地でできるくぼみの前の壁に当たる、と考えて面を θc だけ起こす
+     θc = 15.4° × (v/18.6 m/s) × (θin/44.4°)、e = 0.510 − 0.0375 vn + 0.000903 vn²、μ = 0.43 */
+  function bounce(vh, vy, w, surf, rr) {
+    const vin = Math.hypot(vh, vy), thIn = Math.atan2(-vy, Math.max(1e-6, vh)) / deg;
+    const tc = Math.min(40, 15.4 * (vin / 18.6) * (thIn / 44.4) * surf.crater) * deg;
+    const sn = Math.sin(tc), cs = Math.cos(tc);
+    const vn = vh * sn - vy * cs, vt = vh * cs + vy * sn;      // くぼみの壁に対する法線(押し込む向き)・接線
+    const e = Math.max(0.05, Math.min(0.6, (0.510 - 0.0375 * vn + 0.000903 * vn * vn) * surf.eS));
+    const r = rr || BALL.r, slip = vt + w * r;                 // 接地点のすべり(バックスピンは前向きに足す)
+    let vt2, w2;
+    if (surf.mu * (1 + e) * vn >= (2 / 7) * Math.abs(slip)) { vt2 = (5 * vt - 2 * r * w) / 7; w2 = -vt2 / r; }
+    else { const sg = Math.sign(slip); vt2 = vt - sg * surf.mu * (1 + e) * vn; w2 = w - sg * (5 / (2 * r)) * surf.mu * (1 + e) * vn; }
+    let vh2 = vt2 * cs - e * vn * sn, vy2 = vt2 * sn + e * vn * cs;
+    if (vy2 < 0) vy2 = 0;
+    return { vh: vh2, vy: vy2, w: w2, e, tc: tc / deg };
+  }
+
+  /* ---------- 飛行・バウンド・転がり ---------- */
+  // shot: {speed m/s, angle 度, dir 度(+右), spin rpm}(本物のボールの値)
+  function simulate(shot, c, start, heading, prof) {
+    const P = prof || PROFILES.real;
+    const dt = 1 / 480, r = P.r, k = 0.5 * RHO * Math.PI * P.r * P.r / P.m;
+    const ph = heading + (shot.dir || 0) * deg, hx = Math.cos(ph), hz = Math.sin(ph);
+    const th = shot.angle * deg;
+    let x = start.x, y = 0, z = start.z;
+    let vx = shot.speed * Math.cos(th) * hx, vy = shot.speed * Math.sin(th), vz = shot.speed * Math.cos(th) * hz;
+    let w = shot.spin * 2 * Math.PI / 60;                      // バックスピン(rad/s、+が逆回転)
+    const pts = [[0, x, y, z]];
+    let t = 0, phase = 'air', carry = null, holed = false, hazard = null, apex = 0, landAngle = null, bounces = 0, backed = false;
+    const cup = c.pin, CUP_R = 0.054;
+    const ax = (shot.axis || 0) * deg, ca = Math.cos(ax), sa = Math.sin(ax);
+    const acc = (vx, vy, vz, w) => {
+      const v = Math.hypot(vx, vy, vz) || 1e-9, { cd, cl } = coeffs(v, w, P);
+      const vhh = Math.hypot(vx, vz) || 1e-9;
+      // 揚力は速度に垂直で、進行方向を含む鉛直面内(純バックスピン)
+      let lx = -vy * (vx / vhh) / v, ly = vhh / v, lz = -vy * (vz / vhh) / v;
+      // 回転軸の傾き(+で右へ曲がる):揚力を進行方向まわりに回す。右 = 進行方向 × 上
+      if (ax) { const ux = vx / v, uy = vy / v, uz = vz / v, cx = uy * lz - uz * ly, cy = uz * lx - ux * lz, cz = ux * ly - uy * lx; lx = lx * ca + cx * sa; ly = ly * ca + cy * sa; lz = lz * ca + cz * sa; }
+      return [-k * cd * v * vx + k * cl * v * v * lx, -G - k * cd * v * vy + k * cl * v * v * ly, -k * cd * v * vz + k * cl * v * v * lz];
+    };
+    for (let i = 0; i < 480 * 40; i++) {
       t += dt;
       if (phase === 'air') {
-        const sp = Math.hypot(v[0], v[1], v[2]);
-        const S = sp > 0.1 ? R * Math.abs(w) / sp : 0;
-        const Cl = Math.sign(w) * (S < 0.3 ? 1.99 * S - 3.25 * S * S : 0.305);
-        const k = 0.5 * RHO * A / M * sp, Cd = 0.3;
-        const hs = Math.hypot(v[0], v[2]) || 1e-6, hx = v[0] / hs, hz = v[2] / hs;
-        const lx = -v[1] * hx / sp, ly = hs / sp, lz = -v[1] * hz / sp;
-        v[0] += (-k * Cd * v[0] + k * sp * Cl * lx) * dt;
-        v[1] += (-G - k * Cd * v[1] + k * sp * Cl * ly) * dt;
-        v[2] += (-k * Cd * v[2] + k * sp * Cl * lz) * dt;
-        w *= Math.exp(-dt / 25);
-        p[0] += v[0] * dt; p[1] += v[1] * dt; p[2] += v[2] * dt;
-        if (p[1] <= 0) {
-          p[1] = 0;
-          if (carry === null) carry = { x: p[0], z: p[2] };
-          const zone = zoneAt(c, p[0], p[2]);
-          if (isHaz(zone)) { hazard = zone; pts.push([t, p[0], zone === 'chasm' ? -2.5 : -0.05, p[2]]); break; }
-          const s = SURF[zone], vy = Math.abs(v[1]);
-          const e = Math.max(0.08, s.e - 0.045 * vy);
-          const hs2 = Math.hypot(v[0], v[2]);
-          const ux = hs2 > 1e-6 ? v[0] / hs2 : hx0, uz = hs2 > 1e-6 ? v[2] / hs2 : hz0;
-          let vt = hs2 * Math.max(0.35, 1 - s.dig * vy);
-          const need = (2 / 7) * (vt + R * w), avail = s.mu * (1 + e) * vy;
-          if (avail >= Math.abs(need)) { vt = (5 * vt - 2 * R * w) / 7; w = -vt / R; }
-          else { const sg = Math.sign(vt + R * w); vt -= sg * avail; w -= sg * (5 / (2 * R)) * avail; }
-          v = [ux * vt, e * vy, uz * vt];
-          if (e * vy < 0.45) { v[1] = 0; phase = 'roll'; }
+        // 2次のルンゲ=クッタ
+        const a1 = acc(vx, vy, vz, w);
+        const mx = vx + a1[0] * dt / 2, my = vy + a1[1] * dt / 2, mz = vz + a1[2] * dt / 2;
+        const a2 = acc(mx, my, mz, w);
+        x += mx * dt; y += my * dt; z += mz * dt;
+        vx += a2[0] * dt; vy += a2[1] * dt; vz += a2[2] * dt;
+        w *= Math.exp(-dt / P.spinTau);                        // 空中でのスピン減衰
+        if (y > apex) apex = y;
+        if (y <= 0) {
+          y = 0;
+          const zone = zoneAt(c, x, z);
+          if (carry === null) { carry = { x, z }; landAngle = Math.atan2(-vy, Math.hypot(vx, vz)) / deg; }
+          if (isHaz(zone)) { hazard = zone; pts.push([t, x, zone === 'chasm' ? -2.5 : -0.05, z]); break; }
+          if (Math.hypot(x - cup.x, z - cup.z) < CUP_R - 0.01 && Math.hypot(vx, vz) < 4) { holed = true; x = cup.x; z = cup.z; y = -0.03; pts.push([t, x, y, z]); break; }
+          const vh = Math.hypot(vx, vz), ux = vh > 1e-6 ? vx / vh : hx, uz = vh > 1e-6 ? vz / vh : hz;
+          const sf = SURF[zone] || SURF.green; const b = bounce(vh, vy, w, { crater: sf.crater * P.crater, eS: sf.eS * P.eS, mu: sf.mu }, r); bounces++;
+          vx = ux * b.vh; vz = uz * b.vh; vy = b.vy; w = b.w;
+          if (vy < 0.25) { vy = 0; phase = 'ground'; }
         }
       } else {
-        const zone = zoneAt(c, p[0], p[2]);
-        if (isHaz(zone)) { hazard = zone; pts.push([t, p[0], zone === 'chasm' ? -2.5 : -0.05, p[2]]); break; }
-        const s = SURF[zone];
-        const hs2 = Math.hypot(v[0], v[2]);
-        const ux = hs2 > 1e-6 ? v[0] / hs2 : hx0, uz = hs2 > 1e-6 ? v[2] / hs2 : hz0;
-        let vt = hs2;
-        const slip = vt + R * w;
-        if (Math.abs(slip) > 0.03) { const a = s.muk * G * Math.sign(slip); vt -= a * dt; w -= (5 / (2 * R)) * a * dt; }
-        else { vt = Math.max(0, vt - rollDecel(c, zone) * dt); w = -vt / R; }
-        v[0] = ux * vt; v[2] = uz * vt;
+        // 接地中:接地点のすべりがある間は滑り摩擦、すべりがなくなれば転がり抵抗
+        const zone = zoneAt(c, x, z);
+        if (isHaz(zone)) { hazard = zone; pts.push([t, x, zone === 'chasm' ? -2.5 : -0.05, z]); break; }
+        const s = SURF[zone] || SURF.green;
+        const sx = vx + w * r * hx, sz = vz + w * r * hz, sl = Math.hypot(sx, sz);
+        if (sl > 0.02) {
+          const ax = -s.slide * G * sx / sl, az = -s.slide * G * sz / sl;
+          vx += ax * dt; vz += az * dt;
+          w += (5 / (2 * r)) * (ax * hx + az * hz) * dt;
+        } else {
+          const v = Math.hypot(vx, vz), dec = decelOf(c, zone, P);
+          if (v > 1e-6) { const nv = Math.max(0, v - dec * dt); vx *= nv / v; vz *= nv / v; }
+          w = -(vx * hx + vz * hz) / r;
+        }
         const slopeOn = zone === 'green' || c.allGreen;
-        if (slopeOn) { v[0] += (5 / 7) * G * c.slope.x * dt; v[2] += (5 / 7) * G * c.slope.z * dt; }
-        p[0] += v[0] * dt; p[2] += v[2] * dt;
-        const dc = Math.hypot(p[0] - cup.x, p[2] - cup.z), spd = Math.hypot(v[0], v[2]);
-        if (dc < CUP_R && spd < 1.6) { holed = true; p[0] = cup.x; p[2] = cup.z; p[1] = -0.03; pts.push([t, p[0], p[1], p[2]]); break; }
+        if (slopeOn) { vx += (5 / 7) * G * c.slope.x * dt; vz += (5 / 7) * G * c.slope.z * dt; }
+        if (vx * hx + vz * hz < -0.05) backed = true;
+        x += vx * dt; z += vz * dt;
+        const spd = Math.hypot(vx, vz), dcup = Math.hypot(x - cup.x, z - cup.z);
+        if (dcup < CUP_R && spd < 1.3) { holed = true; x = cup.x; z = cup.z; y = -0.03; pts.push([t, x, y, z]); break; }
         const slopeMag = slopeOn ? Math.hypot(c.slope.x, c.slope.z) : 0;
-        if (spd < 0.02 && Math.abs(slip) < 0.03 && slopeMag < 0.035) break;
-        if (spd < 0.02 && Math.abs(slip) < 0.03) v = [0, 0, 0];
+        if (spd < 0.015 && sl < 0.02 && slopeMag < 0.035) break;
+        if (spd < 0.015 && sl < 0.02) { vx = 0; vz = 0; }
       }
-      if (i % 4 === 0) pts.push([t, p[0], p[1], p[2]]);
+      if (i % 8 === 0) pts.push([t, x, y, z]);
     }
-    if (!hazard) pts.push([t, p[0], p[1], p[2]]);
-    const end = { x: p[0], z: p[2] };
-    const cr = carry || end;
+    if (!hazard && !holed) pts.push([t, x, y, z]);
+    const cr = carry || { x, z };
     return {
-      pts, end, holed, hazard, duration: t,
-      carry: Math.hypot(cr.x - start.x, cr.z - start.z),
-      total: Math.hypot(end.x - start.x, end.z - start.z),
-      toPin: holed ? 0 : Math.hypot(end.x - cup.x, end.z - cup.z),
-      zone: hazard || zoneAt(c, end.x, end.z)
+      pts, end: { x, z }, holed, hazard, duration: t, apex, landAngle, bounces, backed,
+      carry: Math.hypot(cr.x - start.x, cr.z - start.z), carryPt: carry,
+      total: Math.hypot(x - start.x, z - start.z),
+      toPin: holed ? 0 : Math.hypot(x - cup.x, z - cup.z),
+      zone: hazard || zoneAt(c, x, z)
     };
   }
-  return { simulate, zoneAt, inShape };
+  return { simulate, zoneAt, inShape, convert, realLaunch, plasticLaunch, plasticProfile, PROFILES, coeffs, bounce, AERO, REAL, CLUB, plasticBall, impactUnit };
 })();
+const SIM = PHYS;
 
+// ===== 後方・低い位置のカメラでの計測(Down The Line)=====
+// ボールの後ろ(飛ばす方向の延長線上)の低い位置から、縦向きのiPhoneで撮る前提。
+//  1) 置き場所を1回タップで登録 → 置き場所だけを毎コマ見る(軽い・速い)
+//  2) 何もない置き場所(背景)と比べて、丸い物が0.2秒止まったら「打ってOK」
+//  3) 打ったら、飛んでいくボールの位置と見かけの大きさ(遠いほど小さい)を元の解像度で追う
+//  4) 重力の向き(傾きセンサー)と距離(ボールまで)から、3Dの軌道を当てはめて球速・打ち出し角・左右の向きを出す
+//  5) 最後まで追えたら、そのボールの空気抵抗を自動で合わせ込む
+// 画面やカメラには触れず、コマの一部を読む関数(fr.roi)と時刻だけを受け取る。アプリと検証スクリプトで同じものを使う。
+const DTL = (() => {
+  const D_DEFAULT = 0.042;
+  const READY_FRAMES = 12;                 // 60fpsで0.2秒
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-// ===== 6 holes (1 course = 1 hole). Units: meters. +x = toward the hole, +z = right =====
-const COURSES = (() => {
-  const YD = 0.9144;
-  const unitYd = (limitYd) => Math.round(limitYd * 32 / 35); // 35yd limit -> 32yd
-  const E = (type, cx, cz, rx, rz, extra) => Object.assign({ type, kind: 'ellipse', cx, cz, rx, rz }, extra || {});
-  const Rc = (type, x0, x1, z0, z1, extra) => Object.assign({ type, kind: 'rect', x0, x1, z0, z1 }, extra || {});
-  // 曲がったフェアウェイ:中心線の点列と半幅から多角形を作る
-  function corridor(type, pts, hw, extra) {
-    const L = [], R = [];
-    for (let i = 0; i < pts.length; i++) {
-      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
-      let dx = b[0] - a[0], dz = b[1] - a[1]; const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
-      L.push([pts[i][0] + dz * hw, pts[i][1] - dx * hw]); R.push([pts[i][0] - dz * hw, pts[i][1] + dx * hw]);
+  // ---- 小さな道具 ----
+  function lumaMean(R, ring) { let s = 0, n = 0; const { d, w, h } = R; for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { if (ring && x > 2 && y > 2 && x < w - 3 && y < h - 3) continue; const i = (y * w + x) * 4; s += d[i] + d[i + 1] + d[i + 2]; n++; } return n ? s / n : 1; }
+  // 2つの同じ範囲の画像の差(明るさの変化は全体の比で打ち消す)
+  function diffMask(A, B, thr) {
+    // 明るさの比は、枠の画素ごとの比の中央値(クラブなどが一部にかかっても崩れない)
+    const rs = []; const { w, h } = A;
+    for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) { if (x > 2 && y > 2 && x < w - 3 && y < h - 3) continue; const i = (y * w + x) * 4; const a = A.d[i] + A.d[i + 1] + A.d[i + 2], b = B.d[i] + B.d[i + 1] + B.d[i + 2]; if (a > 30) rs.push(b / a); }
+    rs.sort((p, q) => p - q); const g = rs.length ? clamp(rs[rs.length >> 1], 0.6, 1.6) : 1;
+    const n = A.w * A.h, m = new Uint8Array(n);
+    for (let k = 0, i = 0; k < n; k++, i += 4) { const dd = Math.abs(A.d[i] * g - B.d[i]) + Math.abs(A.d[i + 1] * g - B.d[i + 1]) + Math.abs(A.d[i + 2] * g - B.d[i + 2]); if (dd > thr) m[k] = 1; }
+    return m;
+  }
+  function closeOpen(m, w, h) {
+    // 1画素の穴を埋め、1画素の点を消す
+    const a = m.slice();
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const k = y * w + x; if (!m[k]) { const s = m[k - 1] + m[k + 1] + m[k - w] + m[k + w]; if (s >= 3) a[k] = 1; } }
+    const b = a.slice();
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const k = y * w + x; if (a[k]) { const s = a[k - 1] + a[k + 1] + a[k - w] + a[k + w]; if (s <= 1) b[k] = 0; } }
+    return b;
+  }
+  function blobs(m, w, h, minA) {
+    const seen = new Uint8Array(w * h), out = [];
+    for (let k0 = 0; k0 < w * h; k0++) {
+      if (!m[k0] || seen[k0]) continue;
+      const q = [k0]; seen[k0] = 1; let n = 0, sx = 0, sy = 0, x0 = w, x1 = 0, y0 = h, y1 = 0; const px = [];
+      while (q.length) {
+        const k = q.pop(), x = k % w, y = (k / w) | 0; n++; sx += x; sy += y; px.push(k);
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        if (x > 0 && m[k - 1] && !seen[k - 1]) { seen[k - 1] = 1; q.push(k - 1); }
+        if (x < w - 1 && m[k + 1] && !seen[k + 1]) { seen[k + 1] = 1; q.push(k + 1); }
+        if (y > 0 && m[k - w] && !seen[k - w]) { seen[k - w] = 1; q.push(k - w); }
+        if (y < h - 1 && m[k + w] && !seen[k + w]) { seen[k + w] = 1; q.push(k + w); }
+      }
+      if (n >= minA) out.push({ n, x: sx / n, y: sy / n, bw: x1 - x0 + 1, bh: y1 - y0 + 1, px });
     }
-    // 両端を少し丸める
-    const s = pts[0], e = pts[pts.length - 1];
-    const cap = (p, a, b, back) => { const out = []; for (let k = 1; k < 6; k++) { const t = k / 6 * Math.PI; const mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2; const rx = a[0] - mx, rz = a[1] - mz; const c = Math.cos(t), sn = Math.sin(t); out.push([mx + rx * c + back[0] * sn * hw * 0.6, mz + rz * c + back[1] * sn * hw * 0.6]); } return out; };
-    const d0 = [pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]], l0 = Math.hypot(d0[0], d0[1]) || 1;
-    const n = pts.length, d1 = [pts[n - 1][0] - pts[n - 2][0], pts[n - 1][1] - pts[n - 2][1]], l1 = Math.hypot(d1[0], d1[1]) || 1;
-    const poly = [...L, ...cap(e, L[n - 1], R[n - 1], [d1[0] / l1, d1[1] / l1]), ...R.reverse(), ...cap(s, R[R.length - 1], L[0], [d0[0] / l0, d0[1] / l0])];
-    return Object.assign({ type, kind: 'poly', pts: poly }, extra || {});
+    return out;
   }
-  const defs = [
-    { id: 'p2s', par: 2, style: 'シンプル', name: 'ファーストステップ', desc: '右に少し振ったグリーン。手前左のラフに気をつけて、まずは基本の1打。',
-      build: (f) => ({ pin: { x: f, z: 2.5 }, stimp: 9.5, slope: { x: -0.012, z: -0.006 }, route: [],
-        shapes: [E('green', f + 1, 2, 8, 7), corridor('fairway', [[-3, 0], [0.5 * f, 0.5], [f - 6, 2]], 10),
-          E('rough', 0.6 * f, -7.5, 4.5, 3, { top: true }), E('rough', 0.8 * f, 9, 4, 2.6, { top: true })] }) },
-    { id: 'p2t', par: 2, style: 'テクニカル', name: '浮島グリーン', desc: '池に浮かぶ小さなグリーン。届かなくても、越えすぎても池。',
-      build: (f) => ({ pin: { x: f, z: -0.8 }, stimp: 11, slope: { x: 0.006, z: -0.01 }, route: [],
-        shapes: [E('green', f, -0.5, 6, 5.2), E('water', f, -0.5, 12.5, 11.5), corridor('fairway', [[-3, 0], [0.4 * f, 0], [f - 13.5, -0.5]], 9),
-          E('rough', 0.3 * f, 7, 4, 2.6, { top: true })] }) },
-    { id: 'p3s', par: 3, style: 'シンプル', name: 'リバーサイド', desc: 'ゆるやかに左へ曲がるホール。曲がり角の外側のラフは避けたい。',
-      build: (f) => ({ pin: { x: 1.85 * f, z: -0.55 * f }, stimp: 10, slope: { x: -0.012, z: 0.008 }, route: [{ x: 1.0 * f, z: 0 }],
-        shapes: [E('green', 1.85 * f + 1, -0.55 * f, 8, 7), corridor('fairway', [[-3, 0], [0.9 * f, 0], [1.3 * f, -0.2 * f], [1.72 * f, -0.5 * f]], 9),
-          E('rough', 1.12 * f, 0.26 * f, 5, 3.5, { top: true }), E('rough', 0.45 * f, -8.5, 4, 2.4, { top: true })] }) },
-    { id: 'p3t', par: 3, style: 'テクニカル', name: '崖越えアイランド', desc: '右ドッグレッグ。崖の真ん中の浮島に止められれば近道、落ちたら1打罰。',
-      build: (f) => ({ pin: { x: f, z: f + 0.5 }, stimp: 10.5, slope: { x: 0.008, z: -0.012 }, route: [{ x: 0.47 * f, z: 0.53 * f }, { x: f, z: 0 }],
-        shapes: [E('green', f, f + 0.5, 7, 7), corridor('fairway', [[-3, 0], [f, 0], [f, f - 6]], 8),
-          E('fairway', 0.47 * f, 0.53 * f, 0.13 * f, 0.11 * f, { top: true, island: true }),
-          Rc('chasm', 0.25 * f, f - 9.5, Math.max(9.5, 0.32 * f), 0.76 * f),
-          E('rough', f + 9, 0.35 * f, 3, 5, { top: true })] }) },
-    { id: 'p4s', par: 4, style: 'シンプル', name: 'ゆったり湖畔', desc: 'S字にうねるフェアウェイ。左の湖を眺めながら、3打でリズムよく。',
-      build: (f) => ({ pin: { x: 3 * f, z: 0.3 }, stimp: 10, slope: { x: -0.01, z: 0.008 }, route: [{ x: 0.85 * f, z: 0 }, { x: 1.8 * f, z: 0.35 * f }],
-        shapes: [E('green', 3 * f + 1, 0, 8, 7), corridor('fairway', [[-3, 0], [0.8 * f, 0], [1.4 * f, 0.35 * f], [2.2 * f, 0.35 * f], [2.75 * f, 0.05 * f]], 9),
-          E('water', 1.55 * f, -0.36 * f, 0.32 * f, 0.14 * f), E('rough', 2.0 * f, 0.58 * f, 5, 3, { top: true }), E('rough', 1.15 * f, 0.1 * f, 4, 2.5, { top: true })] }) },
-    { id: 'p4t', par: 4, style: 'テクニカル', name: 'アイランドチェイン', desc: '島から島へ渡っていく。左の陸地を回れば安全だが遠回り。',
-      build: (f) => ({ pin: { x: 3 * f, z: 0.4 }, stimp: 11, slope: { x: 0.004, z: 0.01 }, route: [{ x: 1.0 * f, z: 0 }, { x: 2.0 * f, z: 0.1 * f }],
-        shapes: [E('green', 3 * f, 0, 7, 6),
-          E('fairway', 1.0 * f, 0, 0.3 * f, 0.24 * f, { top: true }), E('fairway', 2.0 * f, 0.1 * f, 0.3 * f, 0.24 * f, { top: true }),
-          Rc('water', 0.4 * f, 3 * f + 13, -0.55 * f, 0.55 * f), corridor('fairway', [[-3, 0], [0.4 * f - 1, 0]], 8),
-          Rc('fairway', 0.4 * f, 3 * f + 6, -0.55 * f - 9, -0.55 * f - 1)] }) }
-  ];
-  function make(id, limitYd) {
-    const d = defs.find(x => x.id === id);
-    const f = unitYd(limitYd) * YD;
-    const c = d.build(f);
-    return Object.assign({ id: d.id, par: d.par, style: d.style, name: d.name, desc: d.desc, lengthYd: unitYd(limitYd) * (d.par - 1), tee: { x: 0, z: 0 } }, c);
-  }
-  function practice(yd) {
-    return { id: 'practice', allGreen: true, pin: { x: yd * YD, z: 0 }, stimp: 10, slope: { x: -0.006, z: 0.003 }, shapes: [], route: [], tee: { x: 0, z: 0 } };
-  }
-  return { defs, make, practice, unitYd };
-})();
-
-
-// ===== ボール認識:緑のマットの上に乗っている「丸くて緑でない物」を探す =====
-// 色・穴・黒い点・写る大きさに左右されないよう、ボールそのものの色ではなく
-// 「下側がマットの緑に接している円形の輪郭」を手がかりにする。
-const DETECT = (() => {
-  let cap = 0, G = null, bottom = null, tmp = null;
-  function ensure(n, w) { if (cap < n) { cap = n; G = new Uint8Array(n); tmp = new Uint8Array(n); } if (!bottom || bottom.length < w) bottom = new Int32Array(w); }
-
-  // 緑(マット)かどうか。暗い影の部分も、緑寄りならマットとみなす
-  function isGreenPx(r, g, b) {
-    const mx = r > b ? r : b;
-    if (g < 48) return g >= r && g >= b - 2 && g > 10;
-    return g > r * 1.12 && g > b * 1.05 && g - mx > 10;
-  }
-  function greenMask(d, W, H) {
-    const N = W * H;
-    for (let i = 0, p = 0; i < N; i++, p += 4) tmp[i] = isGreenPx(d[p], d[p + 1], d[p + 2]) ? 1 : 0;
-    // 3x3の多数決でマットのきらめき(白い点)を消す
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      let s = 0, n = 0;
-      for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue; const o = yy * W; for (let dx = -1; dx <= 1; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; s += tmp[o + xx]; n++; } }
-      G[y * W + x] = s * 2 > n ? 1 : 0;
+  // ボールの2色(2-means)
+  function palette(R, m) {
+    const pts = []; for (let k = 0; k < m.length; k++) if (m[k]) { const i = k * 4; pts.push([R.d[i], R.d[i + 1], R.d[i + 2]]); }
+    if (pts.length < 8) return null;
+    const lum = (q) => q[0] + q[1] + q[2]; pts.sort((a, b) => lum(a) - lum(b));
+    let c1 = pts[Math.floor(pts.length * 0.2)].slice(), c2 = pts[Math.floor(pts.length * 0.85)].slice(), n1 = 0, n2 = 0;
+    for (let it = 0; it < 8; it++) {
+      const s1 = [0, 0, 0], s2 = [0, 0, 0]; n1 = 0; n2 = 0;
+      for (const q of pts) { const d1 = Math.abs(q[0] - c1[0]) + Math.abs(q[1] - c1[1]) + Math.abs(q[2] - c1[2]), d2 = Math.abs(q[0] - c2[0]) + Math.abs(q[1] - c2[1]) + Math.abs(q[2] - c2[2]); if (d1 < d2) { s1[0] += q[0]; s1[1] += q[1]; s1[2] += q[2]; n1++; } else { s2[0] += q[0]; s2[1] += q[1]; s2[2] += q[2]; n2++; } }
+      if (n1) c1 = s1.map(v => v / n1); if (n2) c2 = s2.map(v => v / n2);
     }
+    const sep = Math.abs(c1[0] - c2[0]) + Math.abs(c1[1] - c2[1]) + Math.abs(c1[2] - c2[2]);
+    return { c: [c1, c2], two: sep > 90 && Math.min(n1, n2) > pts.length * 0.15 };
   }
-  // 各列について、下から見て「マットの緑が続いたあと最初に緑でなくなる行」= マットに乗っている物の下端
-  function bottomProfile(W, H) {
-    for (let x = 0; x < W; x++) {
-      let y = H - 1, run = 0, found = -1;
-      // マットに入るまで(緑が4行続くまで)上がる
-      for (; y >= 0; y--) { if (G[y * W + x]) { if (++run >= 4) break; } else run = 0; }
-      if (y < 0) { bottom[x] = -2; continue; }        // この列にマットがない
-      // マットのきらめきで止まらないよう、緑でない行が4行以上続いたら物の下端とする
-      for (; y >= 0; y--) { if (!G[y * W + x]) { let k = 1; while (k < 4 && y - k >= 0 && !G[(y - k) * W + x]) k++; if (k >= 4 || y - k < 0) { found = y; break; } } }
-      bottom[x] = found;                               // -1 ならマットが画面上端まで続いている
-    }
+  // ボールの境目の向き:色Aの重心 → 色Bの重心 の向き(境目に垂直)
+  function seamAngle(R, px, pal) {
+    if (!pal || !pal.two) return null;
+    let ax = 0, ay = 0, an = 0, bx = 0, by = 0, bn = 0;
+    for (const k of px) { const i = k * 4, x = k % R.w, y = (k / R.w) | 0, d = R.d;
+      const d1 = Math.abs(d[i] - pal.c[0][0]) + Math.abs(d[i + 1] - pal.c[0][1]) + Math.abs(d[i + 2] - pal.c[0][2]);
+      const d2 = Math.abs(d[i] - pal.c[1][0]) + Math.abs(d[i + 1] - pal.c[1][1]) + Math.abs(d[i + 2] - pal.c[1][2]);
+      if (Math.min(d1, d2) > 120) continue;
+      if (d1 < d2) { ax += x; ay += y; an++; } else { bx += x; by += y; bn++; } }
+    if (an < px.length * 0.12 || bn < px.length * 0.12) return null;
+    return Math.atan2(by / bn - ay / an, bx / bn - ax / an);
   }
-  // 最小二乗で円を当てる(Kasa法)
-  function fitCircle(px, py) {
-    const n = px.length; if (n < 5) return null;
-    let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += px[i]; my += py[i]; } mx /= n; my /= n;
-    let suu = 0, svv = 0, suv = 0, suuu = 0, svvv = 0, suvv = 0, svuu = 0;
-    for (let i = 0; i < n; i++) { const u = px[i] - mx, v = py[i] - my; suu += u * u; svv += v * v; suv += u * v; suuu += u * u * u; svvv += v * v * v; suvv += u * v * v; svuu += v * u * u; }
-    const det = suu * svv - suv * suv; if (Math.abs(det) < 1e-9) return null;
-    const a = 0.5 * (suuu + suvv), b = 0.5 * (svvv + svuu);
-    const uc = (a * svv - b * suv) / det, vc = (b * suu - a * suv) / det;
-    const r = Math.sqrt(uc * uc + vc * vc + (suu + svv) / n);
-    return { x: uc + mx, y: vc + my, r };
-  }
-  function residual(c, px, py) { let s = 0; for (let i = 0; i < px.length; i++) { const e = Math.hypot(px[i] - c.x, py[i] - c.y) - c.r; s += e * e; } return Math.sqrt(s / px.length); }
 
-  function detect(d, W, H) {
-    ensure(W * H, W); greenMask(d, W, H); bottomProfile(W, H);
-    // 1列だけ飛び出た値(穴やきらめき)を、左右5列の中央値でならす
-    const raw = bottom.slice(0, W);
-    for (let x = 0; x < W; x++) { const v = []; for (let k = x - 2; k <= x + 2; k++) if (k >= 0 && k < W && raw[k] >= -1) v.push(raw[k]); if (v.length >= 3 && raw[x] >= -1) { v.sort((a, b) => a - b); bottom[x] = v[v.length >> 1]; } }
-    // マットの上端(物が乗っていない所の下端)を、列ごとの値のなめらかな基準線として求める
-    const base = new Float32Array(W), win = Math.max(8, Math.round(W * 0.12));
-    for (let x = 0; x < W; x++) {
-      const vals = [];
-      for (let k = Math.max(0, x - win); k <= Math.min(W - 1, x + win); k++) if (bottom[k] >= -1) vals.push(bottom[k]);
-      if (!vals.length) { base[x] = NaN; continue; }
-      vals.sort((a, b) => a - b); base[x] = vals[Math.floor(vals.length * 0.25)];
+  // 置き場所の縮小画像(6×6の平均色)。空かどうかの確認だけに使い、端末の中にだけ保存する
+  function thumbOf(R) {
+    const n = 6, out = []; for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
+      let s0 = 0, s1 = 0, s2 = 0, c = 0; const x0 = Math.floor(gx * R.w / n), x1 = Math.floor((gx + 1) * R.w / n), y0 = Math.floor(gy * R.h / n), y1 = Math.floor((gy + 1) * R.h / n);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * R.w + x) * 4; s0 += R.d[i]; s1 += R.d[i + 1]; s2 += R.d[i + 2]; c++; }
+      out.push(Math.round(s0 / Math.max(1, c)), Math.round(s1 / Math.max(1, c)), Math.round(s2 / Math.max(1, c)));
     }
-    // 基準線より下に垂れ下がっている区間 = マットの上に乗っている物
-    const minDip = 2, out = [];
-    let x = 0;
-    while (x < W) {
-      if (!(bottom[x] >= 0 && bottom[x] - base[x] >= minDip)) { x++; continue; }
-      let x2 = x; while (x2 + 1 < W && bottom[x2 + 1] >= 0 && bottom[x2 + 1] - base[x2 + 1] >= minDip) x2++;
-      const w = x2 - x + 1;
-      if (w >= 5 && x > 0 && x2 < W - 1) {
-        let px = [], py = [];
-        for (let k = x; k <= x2; k++) { px.push(k); py.push(bottom[k]); }
-        let c = fitCircle(px, py);
-        // 外れ値(穴や影)を除いてもう一度
-        if (c) { const e = px.map((q, i) => Math.abs(Math.hypot(q - c.x, py[i] - c.y) - c.r)); const lim = [...e].sort((a, b) => a - b)[Math.floor(e.length * 0.8)] + 0.5; const qx = [], qy = []; px.forEach((q, i) => { if (e[i] <= lim) { qx.push(q); qy.push(py[i]); } }); if (qx.length >= 5) { const c2 = fitCircle(qx, qy); if (c2) { c = c2; px = qx; py = qy; } } }
-        if (c) {
-          // 区間の両脇にあるマットの縁(物が乗っていない所)の高さ
-          const side = []; for (let k = 1; k <= 6; k++) { if (x - k >= 0 && bottom[x - k] >= -1) side.push(bottom[x - k]); if (x2 + k < W && bottom[x2 + k] >= -1) side.push(bottom[x2 + k]); }
-          const edge = side.length ? side.reduce((a, b) => a + b, 0) / side.length : -1;
-          c.depth = (c.y - edge) / c.r;
-          const cand = score(d, W, H, c, x, x2, px, py);
-          if (cand) out.push(cand);
+    return out;
+  }
+  function thumbDiff(a, b) {
+    if (!a || !b || a.length !== b.length) return 0;
+    let sa = 0, sb = 0; for (let i = 0; i < a.length; i++) { sa += a[i]; sb += b[i]; } const g = sb / Math.max(1, sa);
+    let d = 0, n = 0; for (let gy = 1; gy < 5; gy++) for (let gx = 1; gx < 5; gx++) for (let c = 0; c < 3; c++) { const i = (gy * 6 + gx) * 3 + c; d += Math.abs(a[i] * g - b[i]); n++; }
+    return d / n;
+  }
+  function solveLin(A, b) {
+    const n = b.length, M = A.map((r, i) => r.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      if (Math.abs(M[p][c]) < 1e-12) return null; [M[c], M[p]] = [M[p], M[c]];
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((r, i) => r[n] / r[i]);
+  }
+  function session(opt) {
+    // opt(): { dist: カメラ→ボールの距離[m], diamMM, massG, drag, sens, up: [x,y,z](カメラ座標の上向き。なければ水平と仮定) }
+    let state = 'setup', tee = null, empty = null, snap = null, stable = 0, prevIn = null, fN = 0;
+    let ball = null, pal = null, seam0 = null, ref = null, refBox = null, readyRoi = null, launchT = 0;
+    let obs = [], lost = 0, lastSeen = null, exp = null, quiet = 0, removeSeen = false, armT = 0, back = 0;
+    const S = () => opt();
+    const roiBox = () => { const R = Math.max(10, Math.ceil(tee.r * 3)); return [Math.round(tee.x - R), Math.round(tee.y - R), 2 * R, 2 * R]; };
+
+    // ---- 置き場所の登録:ボールをタップ → ボールがなくなって落ち着いたら背景を覚え、ボールの丸を測る ----
+    function tap(fr, x, y) {
+      const R = Math.round(Math.min(fr.W, fr.H) * 0.06);
+      tee = { x, y, r: 0, R };
+      snap = fr.roi(Math.round(x - R), Math.round(y - R), 2 * R, 2 * R);
+      state = 'remove'; quiet = 0; removeSeen = false; empty = null;
+      return { ev: 'remove' };
+    }
+    let thumb = null;
+    function useStored(t) { tee = { x: t.x, y: t.y, r: t.r }; thumb = t.thumb || null; state = 'clear'; quiet = 0; empty = null; }
+    function measureFromSnap(cur) {
+      const thr = 60 / S().sens, m = closeOpen(diffMask(cur, snap, thr), snap.w, snap.h);
+      const cx = tee.x - snap.x, cy = tee.y - snap.y;
+      let best = null; for (const b of blobs(m, snap.w, snap.h, 12)) { const dd = Math.hypot(b.x - cx, b.y - cy); if (dd < Math.max(b.bw, b.bh) && (!best || dd < best.dd)) best = Object.assign({ dd }, b); }
+      if (!best || best.bw > 1.35 * best.bh + 2 || best.bh > 1.35 * best.bw + 2) return null;
+      if (best.n < 0.6 * Math.PI * best.bw * best.bh / 4) return null;            // 丸く詰まっていない(クラブの影など)
+      return { x: best.x + snap.x, y: best.y + snap.y, r: Math.sqrt(best.n / Math.PI) };
+    }
+    // 置き場所の様子:背景と比べて、丸い物があるか
+    function teeState(fr) {
+      const [x, y, w, h] = roiBox(); const cur = fr.roi(x, y, w, h);
+      // 動いているか(前のコマとの差)
+      let motion = 0; if (prevIn && prevIn.w === cur.w && prevIn.h === cur.h) { const mm = diffMask(cur, prevIn, 45); for (let k = 0; k < mm.length; k++) motion += mm[k]; } else motion = 999;
+      prevIn = cur;
+      if (!empty || empty.w !== cur.w || empty.h !== cur.h) return { cur, present: false, motion, still: motion < Math.max(8, 0.012 * w * h) };
+      const m = closeOpen(diffMask(cur, empty, 60 / S().sens), w, h);
+      const cx = tee.x - x, cy = tee.y - y; let best = null;
+      for (const b of blobs(m, w, h, 6)) { const dd = Math.hypot(b.x - cx, b.y - cy); if (dd < tee.r * 1.6 && (!best || b.n > best.n)) best = Object.assign({ dd }, b); }
+      let present = false, b = null;
+      if (best) {
+        const A = Math.PI * tee.r * tee.r, round = best.bw < 1.5 * best.bh + 2 && best.bh < 1.5 * best.bw + 2;
+        present = best.n > 0.4 * A && best.n < 3.2 * A && round && best.n > 0.6 * Math.PI * best.bw * best.bh / 4;
+        b = { x: best.x + x, y: best.y + y, r: Math.sqrt(best.n / Math.PI), px: best.px, n: best.n };
+      }
+      return { cur, present, b, motion, still: motion < Math.max(8, 0.012 * w * h), mask: m };
+    }
+
+    // ---- 追跡 ----
+    function trackStep(fr, t) {
+      const r0 = ball.r;
+      let px, py, rad;
+      if (!obs.length) { px = ball.x; py = ball.y - 5 * r0; rad = 9 * r0; }
+      else {
+        const L = obs[obs.length - 1], Q = obs.length >= 2 ? obs[obs.length - 2] : null;
+        const vx = Q ? (L.u - Q.u) / (L.t - Q.t) : 0, vy = Q ? (L.v - Q.v) / (L.t - Q.t) : -r0 * 60 * 0.7;
+        const dt = t - L.t; px = L.u + vx * dt; py = L.v + vy * dt; rad = Math.max(3.5 * L.d, 1.3 * Math.hypot(vx, vy) * dt);
+      }
+      // 背景を覚えている範囲の中に切り詰める
+      let x0 = Math.round(px - rad), y0 = Math.round(py - rad), x1 = Math.round(px + rad), y1 = Math.round(py + rad);
+      if (ref) { x0 = Math.max(x0, ref.x); y0 = Math.max(y0, ref.y); x1 = Math.min(x1, ref.x + ref.w); y1 = Math.min(y1, ref.y + ref.h); }
+      if (x1 - x0 < 4 || y1 - y0 < 4) { lost++; return obs.length ? lost >= 5 : false; }
+      const cur = fr.roi(x0, y0, x1 - x0, y1 - y0);
+      // 背景(打つ直前のコマ)の同じ範囲
+      const bg = cropRef(cur.x, cur.y, cur.w, cur.h);
+      let best = null;
+      if (bg) {
+        const m = closeOpen(diffMask(cur, bg, 55 / S().sens), cur.w, cur.h);
+        const dExp = exp || 2 * r0;
+        for (const b of blobs(m, cur.w, cur.h, Math.max(6, 0.12 * dExp * dExp))) {
+          const d = 2 * Math.sqrt(b.n / Math.PI), gx = b.x + cur.x, gy = b.y + cur.y;
+          if (d < 0.45 * dExp || d > 1.7 * dExp) continue;                     // 大きさが急に変わる物は別物
+          if (d > 1.25 * 2 * r0) continue;                                     // カメラから遠ざかるので、止まっていたときより大きくは写らない
+          if (b.bw > 1.8 * b.bh + 2 || b.bh > 1.8 * b.bw + 2) continue;         // 細長い物(シャフト・クラブのぶれ)
+          if (!obs.length && gy > ball.y - 0.6 * r0) continue;                 // 1点目は止まっていた所より上
+          // 後ろから見ると、ボールはほぼ真上へ上がっていく(左右は±35°以内)。横へ動くクラブを除く
+          if (!obs.length && Math.abs(gx - ball.x) > 2 * r0 + 0.7 * (ball.y - gy)) continue;
+          if (obs.length === 1 && gy > obs[0].v + 0.3 * r0) continue;          // 2点目も上へ
+          if (palDist(cur, b.px) > 110) continue;                              // ボールの色と合わない(クラブ・体)
+          const dd = Math.hypot(gx - px, gy - py);
+          if (!best || dd < best.dd) best = { dd, u: gx, v: gy, d, px: b.px, R: cur };
         }
       }
-      x = x2 + 1;
+      if (best) {
+        const sa = seamAngle(best.R, best.px, pal);
+        obs.push({ t, u: best.u, v: best.v, d: best.d, seam: sa }); exp = best.d; lost = 0;
+      } else lost++;
+      const out = best && (best.u < 3 || best.v < 3 || best.u > fr.W - 4 || best.v > fr.H - 4);
+      return obs.length >= (S().maxObs || 40) || (obs.length ? lost >= 5 : lost >= 10) || out || t - launchT > (S().maxT || 0.75);
     }
-    out.sort((a, b) => b.score - a.score);
-    return out[0] || null;
-  }
+    function palDist(R, px) {
+      if (!pal) return 0; let s = 0, n = 0;
+      for (let j = 0; j < px.length; j += 2) { const i = px[j] * 4, d = R.d; s += Math.min(...pal.c.map(c => Math.abs(d[i] - c[0]) + Math.abs(d[i + 1] - c[1]) + Math.abs(d[i + 2] - c[2]))); n++; }
+      return n ? s / n : 999;
+    }
+    function cropRef(x, y, w, h) {
+      if (!ref) return null;
+      const out = new Uint8ClampedArray(w * h * 4);
+      for (let yy = 0; yy < h; yy++) { const sy = y + yy - ref.y; if (sy < 0 || sy >= ref.h) return null; const sx = x - ref.x; if (sx < 0 || sx + w > ref.w) return null; out.set(ref.d.subarray(((sy * ref.w) + sx) * 4, ((sy * ref.w) + sx + w) * 4), yy * w * 4); }
+      return { d: out, x, y, w, h };
+    }
+    function grabRef(fr) {
+      const r = ball.r, W = Math.round(26 * r), top = Math.round(ball.y - 40 * r);
+      ref = fr.roi(Math.round(ball.x - W), top, 2 * W, Math.round(ball.y + 4 * r) - top);
+    }
 
-  function score(d, W, H, c, xL, xR, px, py) {
-    const r = c.r;
-    if (!(r >= 3 && r <= Math.min(W, H) * 0.3)) return null;
-    // ボールはマットの奥の縁より手前に乗っている(縁のくぼみや角を除く)
-    if (c.depth < -0.3) return null;
-    if (c.x < xL - r * 0.2 || c.x > xR + r * 0.2) return null;
-    const chord = xR - xL + 1; if (chord < r * 1.1 || chord > r * 2.4) return null;
-    const res = residual(c, px, py); if (res > Math.max(0.9, r * 0.1)) return null;
-    // 区間の最下点は円の下端に近いこと(下半分の弧であること)
-    const lowY = Math.max(...py); if (Math.abs(lowY - (c.y + r)) > Math.max(1.5, r * 0.15)) return null;
-    // 円の内側はほぼ緑でない、円のすぐ下はマットの緑
-    let inN = 0, inT = 0, ringG = 0, ringT = 0;
-    const r2 = r * 0.82, x0 = Math.max(0, Math.floor(c.x - r)), x1 = Math.min(W - 1, Math.ceil(c.x + r));
-    for (let y = Math.max(0, Math.floor(c.y - r)); y <= Math.min(H - 1, Math.ceil(c.y + r)); y++) for (let xx = x0; xx <= x1; xx++) { if (Math.hypot(xx - c.x, y - c.y) > r2) continue; inT++; if (!G[y * W + xx]) inN++; }
-    for (let a = 25; a <= 155; a += 5) { const t = a * Math.PI / 180; for (const k of [1.18, 1.3, 1.45]) { const xx = Math.round(c.x + Math.cos(t) * r * k), y = Math.round(c.y + Math.sin(t) * r * k); if (xx < 0 || y < 0 || xx >= W || y >= H) continue; ringT++; if (G[y * W + xx]) ringG++; } }
-    if (!inT || !ringT) return null;
-    const fin = inN / inT, fring = ringG / ringT;
-    if (fin < 0.6 || fring < 0.7) return null;
-    // ボールらしい色(明るい白、または鮮やかな色)がある程度含まれること。クラブや指を除く
-    let like = 0, tot = 0;
-    for (let y = Math.max(0, Math.floor(c.y - r)); y <= Math.min(H - 1, Math.ceil(c.y + r)); y += 1) for (let xx = x0; xx <= x1; xx += 1) {
-      if (Math.hypot(xx - c.x, y - c.y) > r * 0.8 || G[y * W + xx]) continue;
-      const p = (y * W + xx) * 4, R = d[p], Gg = d[p + 1], B = d[p + 2];
-      const mx = Math.max(R, Gg, B), mn = Math.min(R, Gg, B); tot++;
-      if ((mn > 165 && mx - mn < 70) || mx - mn > 95) like++;
+    // ---- 1コマ分 ----
+    function feed(fr, t) {
+      fN++;
+      if (state === 'setup') return null;
+      if (state === 'track') {
+        if (obs.length && t - obs[obs.length - 1].t < 0.002) return null;
+        if (trackStep(fr, t)) { state = 'after'; quiet = 0; return { ev: 'result', res: solve(fr) }; }
+        return null;
+      }
+      const ts = teeState(fr);
+      if (state === 'remove' || state === 'clear' || state === 'after') {
+        // 置き場所が空になって落ち着くのを待つ → 背景として覚える
+        if (state === 'remove') {
+          const [x, y, w, h] = [snap.x, snap.y, snap.w, snap.h];
+          const cur = fr.roi(x, y, w, h); const m = diffMask(cur, snap, 60 / S().sens);
+          // タップした点のまわり(半径6px)が変わった=ボールがなくなった
+          const cx = Math.round(tee.x - x), cy = Math.round(tee.y - y); let ch = 0, nn = 0;
+          for (let yy = cy - 6; yy <= cy + 6; yy++) for (let xx = cx - 6; xx <= cx + 6; xx++) { if ((xx - cx) ** 2 + (yy - cy) ** 2 > 36 || xx < 0 || yy < 0 || xx >= w || yy >= h) continue; nn++; ch += m[yy * w + xx]; }
+          const gone = nn && ch / nn > 0.6;
+          if (gone && ts.still) quiet++; else quiet = 0;
+          removeSeen = gone;
+          if (removeSeen && quiet >= 18) {
+            const mb = measureFromSnap(cur);
+            if (!mb || mb.r < 3 || mb.r > Math.min(fr.W, fr.H) * 0.06) { quiet = 0; return null; }   // クラブが重なっているだけ等。待ち続ける
+            tee = { x: mb.x, y: mb.y, r: mb.r };
+            const [x2, y2, w2, h2] = roiBox(); empty = fr.roi(x2, y2, w2, h2); thumb = thumbOf(empty); prevIn = null; state = 'wait'; stable = 0;
+            return { ev: 'teeset', tee: Object.assign({ thumb }, tee) };
+          }
+          return null;
+        }
+        if (ts.still) quiet++; else quiet = 0;
+        if (quiet >= 18 && state === 'after' && readyRoi && teeChanged(ts.cur) < 0.15) { state = 'ready'; return { ev: 'ready', ball: Object.assign({}, ball) }; }   // 打っていなかった
+        if (quiet >= 18 && empty && state === 'after') {
+          // 前に覚えた空の置き場所と同じに見えるときだけ、新しい背景にする(クラブや足が残っているときは待つ)
+          const m = diffMask(ts.cur, empty, 60 / S().sens); let ch = 0; for (let k = 0; k < m.length; k++) ch += m[k];
+          if (ch > 0.04 * m.length) return null;
+        }
+        if (quiet >= 18) {
+          // 'clear':アプリ再開時。保存した空の置き場所の縮小画像と同じに見えるときだけ、背景として使う
+          if (state === 'clear' && thumb && thumbDiff(thumbOf(ts.cur), thumb) > 28) { quiet = 0; return { ev: 'notempty' }; }
+          empty = ts.cur; thumb = thumbOf(empty); state = 'wait'; stable = 0;
+          return { ev: 'empty', thumb };
+        }
+        return null;
+      }
+      if (state === 'wait') {
+        if (ts.present && ts.still) stable++; else stable = 0;
+        if (stable >= READY_FRAMES) {
+          const b = ts.b; ball = { x: b.x, y: b.y, r: b.r };
+          const bm = new Uint8Array(ts.cur.w * ts.cur.h); for (const k of b.px) bm[k] = 1;
+          pal = palette(ts.cur, bm); seam0 = seamAngle(ts.cur, b.px, pal);
+          readyRoi = ts.cur; grabRef(fr); state = 'ready'; quiet = 0;
+          return { ev: 'ready', ball: Object.assign({}, ball), issue: placeIssue(fr) };
+        }
+        return null;
+      }
+      if (state === 'armed') {
+        // クラブが前に来てボールが隠れている(構え)か、打ったあと。飛んでいくボールが見つかれば追跡、ボールがまた見えれば元に戻る
+        if (teeChanged(ts.cur) < 0.15) { if (++back >= 3) { state = 'ready'; back = 0; } return null; }
+        back = 0;
+        trackStep(fr, t);
+        if (obs.length && lost >= 2) { obs = []; lost = 0; }                   // 続かなかった:クラブなど
+        if (obs.length >= 3) {
+          // 3点とも上へ進み、大きさがそろっていればボール
+          const [a0, a1, a2] = obs, up1 = a0.v - a1.v, up2 = a1.v - a2.v, ds = Math.max(a0.d, a1.d, a2.d) / Math.min(a0.d, a1.d, a2.d);
+          if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 1.4) { state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
+          obs = []; lost = 0;
+        }
+        if (t - armT > 12) { state = 'wait'; stable = 0; return { ev: 'lostball' }; }
+        return null;
+      }
+      if (state === 'ready') {
+        // ボールの所が大きく変わった=打った、またはクラブがボールの前に来た(後ろから見ると構えで隠れる)
+        if (teeChanged(ts.cur) > 0.5) { state = 'armed'; armT = t; back = 0; obs = []; lost = 0; exp = 2 * ball.r; return null; }
+        // 体が止まっているときだけ、追跡用の背景を新しくする(部屋の明るさの変化に追従)
+        if (ts.still) { if (++quiet % 30 === 0) grabRef(fr); } else quiet = 0;
+        return null;
+      }
+      return null;
     }
-    const flike = tot ? like / tot : 0;
-    if (flike < 0.2) return null;
-    const s = fin + fring + Math.min(1, chord / (r * 1.8)) - res / r;
-    return { x: c.x, y: c.y, r, score: s + flike * 0.5, fin, fring, flike, depth: c.depth };
-  }
+    function teeChanged(cur) {
+      const m = diffMask(cur, readyRoi, 60 / S().sens), cx = ball.x - cur.x, cy = ball.y - cur.y, R = ball.r * 0.8;
+      let n = 0, ch = 0; for (let y = Math.floor(cy - R); y <= cy + R; y++) for (let x = Math.floor(cx - R); x <= cx + R; x++) { if (Math.hypot(x - cx, y - cy) > R || x < 0 || y < 0 || x >= cur.w || y >= cur.h) continue; n++; ch += m[y * cur.w + x]; }
+      return n ? ch / n : 0;
+    }
+    function placeIssue(fr) {
+      const dia = 2 * ball.r / Math.min(fr.W, fr.H);
+      if (dia > 0.08) return 'near';
+      if (dia < 0.012) return 'far';
+      return null;
+    }
 
-  // ボールの2色(例:白とオレンジ)を覚える。打ったあとの追跡に使う
-  function palette(d, W, H, b) {
-    const pts = [];
-    for (let y = Math.max(0, Math.floor(b.y - b.r)); y <= Math.min(H - 1, Math.ceil(b.y + b.r)); y++) for (let x = Math.max(0, Math.floor(b.x - b.r)); x <= Math.min(W - 1, Math.ceil(b.x + b.r)); x++) {
-      if (Math.hypot(x - b.x, y - b.y) > b.r * 0.8 || G[y * W + x]) continue; const p = (y * W + x) * 4; pts.push([d[p], d[p + 1], d[p + 2]]);
+    // ---- 軌道の当てはめ ----
+    function solve(fr) {
+      const o = S(), D = (o.diamMM || 42) / 1000, Z0 = o.dist || 1.93;
+      const res = { n: obs.length, obs: obs.slice() };
+      // ボールが戻ってきた(打っていない)・追えなかった
+      if (obs.length < 5) { res.ok = false; res.why = obs.length ? 'short' : 'none'; return res; }
+      const f = (2 * ball.r) * Z0 / D, cx = fr.W / 2, cy = fr.H / 2;
+      const ray = (u, v) => { const x = u - cx, y = v - cy, n = Math.hypot(x, y, f); return [x / n, y / n, f / n]; };
+      const r0 = ray(ball.x, ball.y), P0 = [r0[0] * Z0, r0[1] * Z0, r0[2] * Z0];
+      let up = o.up && Math.hypot(...o.up) > 0.5 ? o.up : [0, -1, 0]; const un = Math.hypot(...up); up = up.map(v => v / un);
+      const g = up.map(v => -9.81 * v);
+      const prof = PHYS.plasticProfile({ massG: o.massG || 5, diamMM: o.diamMM || 42, dragScale: o.drag || 1 });
+      const kA = 0.5 * 1.2 * Math.PI * prof.r * prof.r / prof.m;
+      // 速度ベクトルに垂直で「上」側を向く揚力。axis(rad)だけ進行方向まわりに傾ける
+      function integ(p, ts, spin, axis, dScale) {
+        const [t0, vx0, vy0, vz0] = p; let pos = P0.slice(), vel = [vx0, vy0, vz0], t = t0, w = spin * 2 * Math.PI / 60;
+        const dt = 1 / 480, out = []; let j = 0; const order = ts.map((tt, i) => [tt, i]).sort((a, b) => a[0] - b[0]);
+        const P2 = Object.assign({}, prof, { cdScale: prof.cdScale * (dScale || 1) });
+        const acc = (v) => {
+          const sp = Math.hypot(v[0], v[1], v[2]) || 1e-9, c = PHYS.coeffs(sp, w, P2);
+          const dot = up[0] * v[0] + up[1] * v[1] + up[2] * v[2]; let l = [up[0] - dot * v[0] / (sp * sp), up[1] - dot * v[1] / (sp * sp), up[2] - dot * v[2] / (sp * sp)];
+          const ln = Math.hypot(...l) || 1; l = l.map(q => q / ln);
+          if (axis) { const vh = v.map(q => q / sp), cr = [vh[1] * l[2] - vh[2] * l[1], vh[2] * l[0] - vh[0] * l[2], vh[0] * l[1] - vh[1] * l[0]], ca = Math.cos(axis), sa = Math.sin(axis); l = [l[0] * ca + cr[0] * sa, l[1] * ca + cr[1] * sa, l[2] * ca + cr[2] * sa]; }
+          return [0, 1, 2].map(i => g[i] - kA * c.cd * sp * v[i] + kA * c.cl * sp * sp * l[i]);
+        };
+        while (j < order.length) {
+          while (j < order.length && order[j][0] <= t) { out[order[j][1]] = pos.slice(); j++; }
+          if (j >= order.length) break;
+          const a1 = acc(vel), mv = vel.map((q, i) => q + a1[i] * dt / 2), a2 = acc(mv);
+          pos = pos.map((q, i) => q + mv[i] * dt); vel = vel.map((q, i) => q + a2[i] * dt); t += dt; w *= Math.exp(-dt / prof.spinTau);
+          if (t - t0 > 3) break;
+        }
+        for (let i = 0; i < ts.length; i++) if (!out[i]) out[i] = pos.slice();
+        return out;
+      }
+      function resid(p, use, spin, axis, dScale) {
+        const X = integ(p, use.map(q => q.t), spin, axis, dScale), r = [];
+        use.forEach((q, i) => { const P = X[i], z = Math.max(0.05, P[2]), w = q.w == null ? 1 : q.w, wd = q.wd == null ? 1 : q.wd; r.push(w * (cx + f * P[0] / z - q.u), w * (cy + f * P[1] / z - q.v), wd * 1.5 * (f * D / Math.hypot(...P) - q.d)); });
+        return r;
+      }
+      // レーベンバーグ・マーカート法(数値微分)
+      function lm(p, fn, iters) {
+        let lam = 1e-2, r = fn(p), e = r.reduce((s, v) => s + v * v, 0);
+        for (let it = 0; it < iters; it++) {
+          const J = p.map((_, k) => { const h = Math.max(1e-4, Math.abs(p[k]) * 1e-3); const q = p.slice(); q[k] += h; const r2 = fn(q); return r2.map((v, i) => (v - r[i]) / h); });
+          const n = p.length, A = Array.from({ length: n }, () => new Array(n).fill(0)), b = new Array(n).fill(0);
+          for (let i = 0; i < n; i++) { for (let k = 0; k < n; k++) { let s = 0; for (let m = 0; m < r.length; m++) s += J[i][m] * J[k][m]; A[i][k] = s; } let s = 0; for (let m = 0; m < r.length; m++) s += J[i][m] * r[m]; b[i] = -s; }
+          let improved = false;
+          for (let tries = 0; tries < 6; tries++) {
+            const M = A.map((row, i) => row.map((v, k) => v + (i === k ? lam * (v + 1e-9) : 0)));
+            const dp = solveLin(M, b); if (!dp) { lam *= 10; continue; }
+            const q = p.map((v, i) => v + dp[i]), r2 = fn(q), e2 = r2.reduce((s, v) => s + v * v, 0);
+            if (e2 < e) { p = q; r = r2; e = e2; lam = Math.max(1e-6, lam / 3); improved = true; break; } else lam *= 8;
+          }
+          if (!improved) break;
+        }
+        return { p, rms: Math.sqrt(e / r.length) };
+      }
+      // 初期値:最初の数点を3Dにして、止まっていた所からの速度を出す
+      const P3 = (q) => { const R = f * D / q.d, rr = ray(q.u, q.v); return rr.map(v => v * R); };
+      const k2 = Math.min(3, obs.length - 1), A0 = P3(obs[0]), A2 = P3(obs[k2]);
+      let vel = A2.map((v, i) => (v - A0[i]) / (obs[k2].t - obs[0].t));
+      const sp0 = Math.hypot(...vel) || 1, t0 = obs[0].t - Math.hypot(...A0.map((v, i) => v - P0[i])) / sp0;
+      const use = obs.slice(0, Math.min(obs.length, 14)).map(q => Object.assign({}, q));
+      // 大きさ(=距離)の外れ値:遠ざかるほど小さくなり、距離はほぼ一定の速さで増える。1/直径 を直線で当てはめ(最小メジアン)、12%以上ずれた点の大きさは使わない
+      {
+        const R = use.map(q => 1 / q.d), T = use.map(q => q.t); let best = null;
+        for (let i = 0; i < use.length; i++) for (let j = i + 2; j < use.length; j++) {
+          const b = (R[j] - R[i]) / (T[j] - T[i]), a = R[i] - b * T[i];
+          const e = R.map((r, k) => Math.abs(r - (a + b * T[k])) / r).sort((x, y) => x - y)[use.length >> 1];
+          if (b > 0 && (!best || e < best.e)) best = { a, b, e };
+        }
+        if (best) use.forEach((q, k) => { if (Math.abs(R[k] - (best.a + best.b * T[k])) / R[k] > 0.12) q.wd = 0; });
+        use.forEach(q => { if (q.d > 2.1 * ball.r) q.wd = 0; });
+      }
+      let p = [t0, ...vel], spin = 0, fit = null;
+      const launchOf = (pp) => {
+        const v = pp.slice(1), sp = Math.hypot(...v), fwd0 = [0, 0, 1], dot = fwd0[0] * up[0] + fwd0[1] * up[1] + fwd0[2] * up[2];
+        let fw = fwd0.map((q, i) => q - dot * up[i]); const fn = Math.hypot(...fw); fw = fw.map(q => q / fn);
+        const rt = [up[1] * fw[2] - up[2] * fw[1], up[2] * fw[0] - up[0] * fw[2], up[0] * fw[1] - up[1] * fw[0]];
+        const vu = v[0] * up[0] + v[1] * up[1] + v[2] * up[2], vf = v[0] * fw[0] + v[1] * fw[1] + v[2] * fw[2], vr = v[0] * rt[0] + v[1] * rt[1] + v[2] * rt[2];
+        // rt は up×fw。カメラ座標で右(+x)を向くように符号をそろえる
+        const sgn = rt[0] >= 0 ? 1 : -1;
+        return { speed: sp, angle: Math.atan2(vu, Math.hypot(vf, vr)) * 180 / Math.PI, dir: Math.atan2(sgn * vr, vf) * 180 / Math.PI };
+      };
+      // 境目の傾き → 回転軸の傾き
+      let axis = 0, axisN = 0;
+      if (seam0 != null) { let s = 0, c = 0; for (const q of obs) if (q.seam != null && q.d >= Math.max(14, 1.1 * ball.r)) { const d = q.seam - seam0; s += Math.sin(d); c += Math.cos(d); axisN++; } if (axisN >= 5 && Math.abs(Math.cos(seam0)) > 0.85) { const a = Math.atan2(s, c), R = Math.hypot(s, c) / axisN; if (R > 0.8) axis = clamp(a, -0.35, 0.35); } }
+      for (let pass = 0; pass < 3; pass++) {
+        fit = lm(p, (q) => resid(q, use, spin, axis, 1), 25); p = fit.p;
+        const L = launchOf(p); spin = PHYS.plasticLaunch(L.speed, Math.max(1, L.angle), { massG: o.massG, diamMM: o.diamMM, cor: o.cor, attack: o.attack }).spin;
+        // 外れた点(クラブと重なって大きく写ったコマなど)を軽くして、もう一度当てはめる
+        const rr = resid(p, use.map(q => Object.assign({}, q, { w: 1, wd: q.wd === 0 ? 0 : 1 })), spin, axis, 1);
+        const ep = use.map((q, i) => Math.hypot(rr[3 * i], rr[3 * i + 1])), ed = use.map((q, i) => Math.abs(rr[3 * i + 2]));
+        const med = (a) => { const b = a.slice().sort((x, y) => x - y); return b[b.length >> 1] || 1; };
+        const mp = Math.max(0.7, med(ep)), md = Math.max(0.7, med(ed));
+        use.forEach((q, i) => { q.w = ep[i] > 3 * mp ? 3 * mp / ep[i] : 1; if (q.wd !== 0) q.wd = ed[i] > 3 * md ? 3 * md / ed[i] : 1; });
+      }
+      fit = { p, rms: Math.sqrt(resid(p, use, spin, axis, 1).reduce((a, v) => a + v * v, 0) / (3 * use.length)) };
+      const L = launchOf(p);
+      Object.assign(res, { ok: true, speed: L.speed, angle: L.angle, dir: L.dir, spin, axis: axis * 180 / Math.PI, rms: fit.rms, impactT: p[0], f, launchT });
+      // 前半だけ・後半だけで当てはめても同じ速さになるか(ならなければ、別の物を追ったか大きさが乱れている)
+      if (use.length >= 10) {
+        const h1 = use.slice(0, Math.ceil(use.length * 0.7)), h2 = use.slice(Math.floor(use.length * 0.3));
+        const s1 = launchOf(lm(p, (q) => resid(q, h1, spin, axis, 1), 15).p).speed, s2 = launchOf(lm(p, (q) => resid(q, h2, spin, axis, 1), 15).p).speed;
+        res.spread = Math.abs(s1 - s2) / L.speed;
+        if (res.spread > 0.4) { Object.assign(res, { ok: false, why: 'odd', speed: L.speed, angle: L.angle, dir: L.dir, rms: fit.rms, impactT: p[0], f }); return res; }
+      }
+      if (!(L.speed > 0.8 && L.speed < 15 && L.angle > 2 && L.angle < 80 && Math.abs(L.dir) < 30) || fit.rms > Math.max(4, 0.5 * ball.r)) { res.ok = false; res.why = 'odd'; return res; }
+      // 長く追えたら、空気抵抗の倍率も合わせる(0.3秒以上)
+      // 着地(画面の上で下へ動いていたのが止まる・跳ね返る)までの点で、空気抵抗の倍率を合わせる
+      let cut = obs.length, top = 0;
+      for (let i = 1; i < obs.length; i++) { if (obs[i].v < obs[top].v) top = i; if (i > top + 2 && obs[i].v < obs[i - 1].v - 0.5 && obs[i - 1].v >= obs[i - 2].v) { cut = i - 1; break; } }
+      res.bounce = cut < obs.length ? cut : -1;
+      if (cut >= 16 && obs[cut - 1].t - obs[0].t > 0.28) {
+        // 着地までの長い軌道で、打ち出しと空気抵抗をいっしょに当てはめ直す(点が多いぶん、速さが安定する)
+        const all = obs.slice(0, Math.min(cut, 90)).map((q, i) => Object.assign({}, q, i < use.length ? { w: use[i].w, wd: use[i].wd } : {}));
+        all.forEach(q => { if (q.d > 2.1 * ball.r) q.wd = 0; });
+        let best = null;
+        for (const ds of [0.4, 0.5, 0.6, 0.75, 0.9, 1.1, 1.35, 1.7, 2.0]) {
+          const pd = lm(p, (q) => resid(q, all, spin, axis, ds), 8);
+          if (!best || pd.rms < best.rms) best = { ds, rms: pd.rms, p: pd.p };
+        }
+        res.dragFit = best.ds; res.dragRms = best.rms;
+        const L2 = launchOf(best.p);
+        if (best.rms < Math.max(4, 0.5 * ball.r) && L2.speed > 0.8 && L2.speed < 15) {
+          res.short = { speed: res.speed, angle: res.angle, dir: res.dir };
+          Object.assign(res, { speed: L2.speed, angle: L2.angle, dir: L2.dir, impactT: best.p[0], long: true });
+          res.spin = PHYS.plasticLaunch(L2.speed, Math.max(1, L2.angle), { massG: o.massG, diamMM: o.diamMM, cor: o.cor, attack: o.attack }).spin;
+        }
+      }
+      return res;
     }
-    if (pts.length < 4) return null;
-    const lum = (q) => q[0] + q[1] + q[2];
-    pts.sort((a, c) => lum(a) - lum(c));
-    let c1 = pts[Math.floor(pts.length * 0.25)].slice(), c2 = pts[Math.floor(pts.length * 0.8)].slice();
-    for (let it = 0; it < 6; it++) {
-      const s1 = [0, 0, 0, 0], s2 = [0, 0, 0, 0];
-      for (const q of pts) { const d1 = Math.abs(q[0] - c1[0]) + Math.abs(q[1] - c1[1]) + Math.abs(q[2] - c1[2]), d2 = Math.abs(q[0] - c2[0]) + Math.abs(q[1] - c2[1]) + Math.abs(q[2] - c2[2]); const s = d1 < d2 ? s1 : s2; s[0] += q[0]; s[1] += q[1]; s[2] += q[2]; s[3]++; }
-      if (s1[3]) c1 = [s1[0] / s1[3], s1[1] / s1[3], s1[2] / s1[3]]; if (s2[3]) c2 = [s2[0] / s2[3], s2[1] / s2[3], s2[2] / s2[3]];
-    }
-    return [c1, c2];
+    return {
+      feed, tap, useStored,
+      reset() { state = tee ? 'clear' : 'setup'; quiet = 0; },
+      get state() { return state; }, get tee() { return tee; }, get ball() { return ball; }, get obs() { return obs; },
+      get emptyReady() { return !!empty; }, get thumb() { return thumb; }
+    };
   }
-  function isGreenAt(i) { return G[i] === 1; }
-  return { detect, palette, isGreenPx, isGreenAt };
+  return { session };
 })();
-
 
 
 const $ = (id) => document.getElementById(id);
@@ -330,27 +677,10 @@ const store = {
 };
 function toast(t) { const el = $('toast'); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => { el.hidden = true; }, 3200); }
 function setConn(state, text) { $('connDot').className = 'dot ' + (state || ''); $('connText').textContent = text; }
-/* 生成したイラスト。img/ に同名ファイルがあればそちらを優先する */
-const ART_CDN = 'https://d8j0ntlcm91z4.cloudfront.net/user_3HJhNJAXEinI1BPtZI7pPcGddZP/hf_20260930_035851_';
-const ART = { hero: 'f7f7c32d-d4e0-4a8f-9766-afc2f2b7cdd4', free: '9315a2f3-e9b5-4faa-9aa4-aa445136cbfc', course: '40d67dd4-2854-49a6-883d-7488665e4e7b',
-  p2s: 'fb58a3a6-7a83-4f3d-ade8-4605a950cb68', p2t: '1ba9554f-54ca-48b5-96e0-0167c3e4f6d9', p3s: 'e9c16715-1d85-4718-b731-c10f0524dff9',
-  p3t: '39cc3ca0-15fa-4eb1-b9b8-5da0cda21fe2', p4s: '3a78c7e0-3b1b-44b1-9287-4ccff75cd0a2', p4t: '9c388d3e-2d97-4b43-a67b-b15e95b4c754' };
-const artCache = {};
-function artUrl(key) {
-  if (!artCache[key]) artCache[key] = new Promise(res => {
-    const local = new Image();
-    local.onload = () => res(`img/${key}.webp`);
-    local.onerror = () => { const cdn = ART[key] ? `${ART_CDN}${ART[key]}_min.webp` : null; if (!cdn) return res(null); const im = new Image(); im.onload = () => res(cdn); im.onerror = () => res(null); im.src = cdn; };
-    local.src = `img/${key}.webp`;
-  });
-  return artCache[key];
-}
-function paintArt(node, key) { artUrl(key).then(u => { if (u) node.style.backgroundImage = `url("${u}")`; }); }
-function paintAll(root) { (root || document).querySelectorAll('[data-img]').forEach(n => paintArt(n, n.dataset.img)); }
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
 /* ---------------- views & role ---------------- */
-const VIEWS = ['roleView', 'camView', 'homeView', 'freeView', 'courseView', 'playView'];
+const VIEWS = ['roleView', 'camView', 'playView'];
 function show(v) { VIEWS.forEach(id => { $(id).hidden = id !== v; }); if (v === 'playView') World.resize(); window.scrollTo(0, 0); }
 let role = store.get('role', null);
 const hashCode = ((location.hash || '').match(/p=([A-Za-z0-9]{8})/) || [])[1];
@@ -361,7 +691,7 @@ if (hashCode) {
 function startRole(r) {
   role = r; store.set('role', r); $('switchRole').hidden = false;
   if (r === 'camera') { show('camView'); Net.initCamera(); }
-  else { show('homeView'); App.initHome(); Net.host(); Power.keepAwake(); }
+  else { App.start(); Net.host(); Power.keepAwake(); }
 }
 $('pickCam').onclick = () => startRole('camera');
 $('pickGreen').onclick = () => startRole('green');
@@ -484,48 +814,99 @@ const Net = (() => {
 })();
 
 /* ======================================================================
-   CAMERA (iPhone): ball recognition (DETECT) + launch measurement
+   CAMERA (iPhone): ボールの後ろ・低い位置から撮って計測する(DTL)
    ====================================================================== */
 const Cam = (() => {
   const vid = $('vid'), ov = $('overlay'), octx = ov.getContext('2d');
-  const proc = document.createElement('canvas'); const pctx = proc.getContext('2d', { willReadFrequently: true });
-  const LONG = 640;                      // 解析する画像の長辺(px)
-  let PW = 640, PH = 360, srcW = 0, srcH = 0;
-  let stream = null, wake = null, running = false, frameN = 0;
-  let state = 'off', lastSent = '', prev = null, info = { next: '', lie: '' }, issue = null;
-  let ball = null, pal = null;           // 認識したボール {x,y,r} と、その2色
-  let cand = null, stable = 0, readyFrac = 0, low = 0, needTap = false;
-  let pts = [], trackStart = 0, lost = 0, cooldownUntil = 0, lastTrack = null, lastPresentT = 0;
+  const scratch = document.createElement('canvas'); const sctx = scratch.getContext('2d', { willReadFrequently: true });
+  let VW = 0, VH = 0, stream = null, wake = null, running = false, sess = null;
+  let state = 'off', lastSent = '', info = { next: '', lie: '' }, issue = null, cooldownUntil = 0, lastRes = null;
   let lastTouch = Date.now(), lastActive = Date.now(), dark = false;
   const ftimes = [];
-  const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000, STABLE = 6;
-  const S = { diam: store.get('diam', 42.7), rad: 1, factor: store.get('factor', 1), angOff: store.get('angOff', 0), spin: store.get('spin', 1), sens: store.get('sens', 1) };
-  [['sDiam','oDiam','diam',v=>v.toFixed(1)+' mm'],['sRad','oRad','rad',v=>'×'+v.toFixed(2)],['sFactor','oFactor','factor',v=>'×'+v.toFixed(2)],
-   ['sAngOff','oAngOff','angOff',v=>(v>0?'+':'')+v.toFixed(1)+'°'],['sSpin','oSpin','spin',v=>'×'+v.toFixed(2)],['sSens','oSens','sens',v=>'×'+v.toFixed(2)]]
-  .forEach(([s,o,k,f]) => { const e=$(s); e.value=S[k]; $(o).textContent=f(+e.value); e.oninput=()=>{ S[k]=+e.value; $(o).textContent=f(+e.value); if(k!=='rad') store.set(k,+e.value); }; });
+  const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000;
+  const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
+  let lastShot = null;
 
+  // ---- 傾きセンサー(重力の向き)----
+  // 端末の座標 → 画面の座標 → カメラの座標(右+x・下+y・前+z)の「上向き」の単位ベクトル
+  let gAvg = null, motionOK = false;
+  function onMotion(e) {
+    const a = e.accelerationIncludingGravity; if (!a || a.x == null) return;
+    const v = [a.x, a.y, a.z]; motionOK = true;
+    gAvg = gAvg ? gAvg.map((q, i) => q * 0.92 + v[i] * 0.08) : v;
+  }
+  function upCam() {
+    if (!gAvg) return null;
+    const n = Math.hypot(...gAvg); if (n < 5) return null;
+    let [x, y, z] = gAvg.map(q => q / n);
+    const ang = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) * Math.PI / 180;
+    const xs = x * Math.cos(ang) + y * Math.sin(ang), ys = -x * Math.sin(ang) + y * Math.cos(ang);
+    let u = [xs, -ys, -z];
+    if (u[1] > 0) u = u.map(q => -q);                    // 端末によって符号が逆。カメラは立てて使うので「上」は画面の上側
+    return u;
+  }
+  const pitchDeg = () => { const u = upCam(); return u ? Math.asin(clamp(u[2], -1, 1)) * 180 / Math.PI : null; };
+  async function askMotion() {
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') return false;
+      }
+      window.addEventListener('devicemotion', onMotion);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // ---- 設定 ----
+  $('carryApply').onclick = () => {
+    const cm = Number($('carryCm').value);
+    if (!lastShot) { toast('先に1球打ってください'); return; }
+    if (!(cm >= 20 && cm <= 3000)) { toast('落ちた距離を20〜3000cmで入力してください'); return; }
+    const flat = { allGreen: false, shapes: [], pin: { x: 999, z: 0 }, stimp: 10, slope: { x: 0, z: 0 } };
+    const carryAt = (ds) => PHYS.simulate(lastShot, flat, { x: 0, z: 0 }, 0, PHYS.plasticProfile({ massG: S.mass, diamMM: S.diam, dragScale: ds })).carry;
+    let lo = 0.3, hi = 2.5;
+    if (carryAt(lo) < cm / 100 || carryAt(hi) > cm / 100) { toast('この距離には合わせられません。計測値か入力を確認してください'); return; }
+    for (let i = 0; i < 30; i++) { const mid = (lo + hi) / 2; if (carryAt(mid) > cm / 100) lo = mid; else hi = mid; }
+    S.drag = +((lo + hi) / 2).toFixed(3); store.set('drag', S.drag); showDrag();
+    toast(`空気抵抗の補正を×${S.drag.toFixed(2)}にしました`);
+  };
+  const showDrag = () => { $('oDrag').textContent = '×' + S.drag.toFixed(2); };
+  $('dragReset').onclick = () => { S.drag = 1; store.set('drag', 1); showDrag(); toast('空気抵抗の補正を元に戻しました'); };
+  [['sDist','oDist','dist',v=>v.toFixed(2)+' m'],['sDiam','oDiam','diam',v=>v.toFixed(1)+' mm'],['sMass','oMass','mass',v=>v.toFixed(1)+' g'],['sCor','oCor','cor',v=>v.toFixed(2)],
+   ['sAttack','oAttack','attack',v=>v.toFixed(1)+'°'],['sSens','oSens','sens',v=>'×'+v.toFixed(2)]]
+  .forEach(([s,o,k,f]) => { const e=$(s); e.value=S[k]; $(o).textContent=f(+e.value); e.oninput=()=>{ S[k]=+e.value; $(o).textContent=f(+e.value); store.set(k,+e.value); }; });
+  showDrag();
+  $('dropApply').onclick = () => {
+    const h = Number($('dropCm').value);
+    if (!(h > 0 && h < 100)) { toast('跳ね返った高さを1〜99cmで入力してください'); return; }
+    const e = Math.round(Math.sqrt(h / 100) * 100) / 100;
+    S.cor = clamp(e, 0.3, 0.85); store.set('cor', S.cor); $('sCor').value = S.cor; $('oCor').textContent = S.cor.toFixed(2);
+    toast(`反発係数を${S.cor.toFixed(2)}にしました`);
+  };
+
+  // ---- 状態の表示 ----
   const TEXT = {
-    off: ['カメラを開始してください', '三脚のiPhoneを横向きにして、ボールを挟んで自分と向かい合う位置(約1m)に置きます'],
-    search: ['ボールを置いてください', 'マットの上に置いたボールを自動で見つけます'],
-    tap: ['ボールをタップして登録', '映像の中の、止まっているボールを1回タップしてください'],
+    off: ['カメラを開始してください', 'ボールの真後ろ1.8m・床に近い低い位置に、iPhoneを縦向きで置きます'],
+    setup: ['ボールをタップ', 'ボールを置き場所に置いて、映像の中のボールを1回タップしてください'],
+    remove: ['ボールをどけてください', '置き場所を覚えます。ボールを手でどけるか、そのまま1球打ってください'],
+    clear: ['置き場所を確認中', 'ボールがない状態で少し待ってください'],
+    wait: ['ボールを置いてください', '置き場所にボールを置くと、自動で見つけます'],
     ready: ['打ってOK', ''],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
     error: ['もう一度どうぞ', '']
   };
-  // 計測できない置き方のときの案内。iPadには記号(portrait/near/far)だけを送る
   const ISSUE = {
-    portrait: ['iPhoneを横向きにしてください', '縦向きだと、打ったボールがすぐ画面の外に出てしまい、球速を測れません'],
-    near: ['カメラが近すぎます', 'ボールから1m前後離してください。今の距離だと、打った瞬間にボールが画面の外に出てしまいます'],
-    far: ['カメラが遠すぎます', 'ボールが小さすぎて正確に測れません。もう少し近づけてください']
+    near: ['カメラが近すぎます', 'ボールから1.8mくらい離してください'],
+    far: ['カメラが遠すぎます', 'ボールが小さすぎます。1.8mくらいまで近づけてください'],
+    landscape: ['iPhoneを縦向きにしてください', '縦向きのほうが、上がっていくボールを長く追えます']
   };
-  function infoLine() { if (!info.next && !info.lie) return ''; return [info.next ? `次は ${info.next}` : '', info.lie ? `${info.lie}から打つ` : ''].filter(Boolean).join('、'); }
+  function infoLine() { return info.lie ? `${info.lie}から打つ` : ''; }
   function setState(s, sub) {
     state = s;
     const t = s === 'adjust' ? ISSUE[issue] : (TEXT[s] || ['', '']);
-    $('camStatus').dataset.state = s === 'adjust' ? 'error' : s;
+    $('camStatus').dataset.state = s === 'adjust' ? 'error' : s === 'setup' || s === 'remove' || s === 'clear' ? 'tap' : s;
     $('stateText').textContent = t[0];
-    $('stateSub').textContent = sub || ((s === 'ready' || s === 'search') && infoLine()) || t[1];
+    $('stateSub').textContent = sub || (s === 'ready' && infoLine()) || t[1];
     $('boText').textContent = t[0];
     pushStatus();
   }
@@ -533,40 +914,57 @@ const Cam = (() => {
     const st = state === 'ready' ? 'ready' : state === 'track' ? 'track' : state === 'off' ? 'off' : state === 'adjust' ? 'adjust' : 'wait';
     const key = st + (st === 'adjust' ? issue : '');
     if (!force && key === lastSent) return;
-    lastSent = key; Net.send(st === 'adjust' ? { type: 'status', state: st, issue } : { type: 'status', state: st });
+    lastSent = key; Net.send(st === 'adjust' ? { type: 'status', state: st, issue: issue === 'far' ? 'far' : issue === 'landscape' ? 'portrait' : 'near' } : { type: 'status', state: st });
   }
   function onInfo(m) {
-    info.next = typeof m.next === 'string' ? m.next.slice(0, 16) : '';
-    info.lie = m.lie === 'マット' || m.lie === '絨毯' ? m.lie : '';
-    if (state === 'ready' || state === 'search') setState(state);
+    info.next = '';
+    info.lie = m.lie === 'ラフ' || m.lie === 'マット' ? m.lie : '';
+    if (state === 'ready') setState(state);
   }
   function setButtons() { $('camStart').hidden = running; $('camStop').hidden = !running; }
-  function setupProc() {
-    srcW = vid.videoWidth; srcH = vid.videoHeight;
-    const s = LONG / Math.max(srcW, srcH); PW = Math.round(srcW * s); PH = Math.round(srcH * s);
-    proc.width = PW; proc.height = PH; prev = null;
-    $('stage').style.aspectRatio = srcW + ' / ' + srcH;
+  function showTilt() {
+    const p = pitchDeg();
+    $('tiltOut').textContent = p == null ? (motionOK ? '測定中…' : '取れません(水平として計算)') : `${p >= 0 ? '上向き' : '下向き'} ${Math.abs(p).toFixed(1)}°`;
+  }
+
+  // ---- 映像の一部を元の解像度で読む ----
+  function roi(x, y, w, h) {
+    x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    const x0 = clamp(x, 0, VW - 1), y0 = clamp(y, 0, VH - 1), x1 = clamp(x + w, 1, VW), y1 = clamp(y + h, 1, VH);
+    const ww = Math.max(1, x1 - x0), hh = Math.max(1, y1 - y0);
+    if (scratch.width < ww) scratch.width = ww; if (scratch.height < hh) scratch.height = hh;
+    sctx.drawImage(vid, x0, y0, ww, hh, 0, 0, ww, hh);
+    return { d: sctx.getImageData(0, 0, ww, hh).data, x: x0, y: y0, w: ww, h: hh };
+  }
+  const frameObj = { get W() { return VW; }, get H() { return VH; }, roi };
+  const teeKey = () => `tee_${VW}x${VH}`;
+  function newSession() {
+    sess = DTL.session(() => ({ dist: S.dist, diamMM: S.diam, massG: S.mass, cor: S.cor, attack: S.attack, drag: S.drag, sens: S.sens, up: upCam(), maxObs: 100, maxT: 1.6 }));
+    const t = store.get(teeKey(), null);
+    if (t && t.r > 2) { sess.useStored(t); setState('clear'); } else setState('setup');
   }
 
   async function start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('このブラウザではカメラを使えません(Safariで開いてください)'); return; }
+    const motionP = askMotion();                         // 「カメラを開始」を押したときに、傾きセンサーの許可も聞く
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60, max: 60 } } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } } });
     } catch (e) { setState('error', 'カメラの使用が許可されませんでした。設定 → Safari → カメラ を確認してください'); return; }
     vid.srcObject = stream;
     try { await vid.play(); } catch (e) {}
     await new Promise(r => { if (vid.videoWidth) r(); else vid.onloadedmetadata = () => r(); });
-    setupProc();
+    VW = vid.videoWidth; VH = vid.videoHeight; $('stage').style.aspectRatio = VW + ' / ' + VH;
     $('stageEmpty').hidden = true;
+    if (!(await motionP)) toast('傾きセンサーを使えないため、iPhoneは水平として計算します');
     try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) { wake = null; }
     running = true; lastTouch = lastActive = Date.now(); setButtons();
-    toSearch();
-    loop();
+    newSession(); loop();
   }
   function stop(msg) {
     running = false;
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     vid.srcObject = null;
+    window.removeEventListener('devicemotion', onMotion); gAvg = null;
     try { if (wake) wake.release(); } catch (e) {} wake = null;
     $('stageEmpty').hidden = false; setButtons(); setDark(false);
     octx.clearRect(0, 0, ov.width, ov.height);
@@ -574,6 +972,7 @@ const Cam = (() => {
   }
   $('camStart').onclick = start;
   $('camStop').onclick = () => stop();
+  $('reTee').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } store.set(teeKey(), null); newSession(); setDark(false); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
   document.addEventListener('visibilitychange', () => { if (document.hidden && running) stop('画面を離れたのでカメラを止めました。「カメラを開始」で再開します'); });
   window.addEventListener('pagehide', () => { if (running) stop(); });
 
@@ -582,190 +981,84 @@ const Cam = (() => {
   document.addEventListener('pointerdown', () => { lastTouch = lastActive = Date.now(); if (dark) setDark(false); }, true);
   setInterval(() => {
     if (!running || role !== 'camera') return;
-    const now = Date.now();
+    const now = Date.now(); showTilt();
     if (now - lastActive > IDLE_STOP) { stop('10分間打たなかったので、カメラを休止しました。「カメラを開始」で再開します'); return; }
-    if (!dark && !needTap && state !== 'adjust' && now - lastTouch > IDLE_DARK) setDark(true);
+    if (!dark && state !== 'setup' && state !== 'adjust' && now - lastTouch > IDLE_DARK) setDark(true);
     if (state === 'ready' || state === 'adjust') pushStatus(true);
   }, 1000);
 
-  function grab() { pctx.drawImage(vid, 0, 0, PW, PH); return pctx.getImageData(0, 0, PW, PH).data; }
-  const L1 = (d, i, c) => Math.abs(d[i] - c[0]) + Math.abs(d[i + 1] - c[1]) + Math.abs(d[i + 2] - c[2]);
-  const palDist = (d, i) => pal ? Math.min(L1(d, i, pal[0]), L1(d, i, pal[1])) : 999;
-  const fps = () => ftimes.length > 10 ? (ftimes.length - 1) / (ftimes[ftimes.length - 1] - ftimes[0]) : 0;
-
-  function toSearch() { ball = null; cand = null; stable = 0; low = 0; pts = []; lost = 0; issue = null; if (running) setState(needTap ? 'tap' : 'search'); }
-  function setupIssue(b) {
-    if (PH > PW) return 'portrait';
-    const dia = 2 * b.r / PW;
-    if (dia > 0.12) return 'near';
-    if (dia < 0.018) return 'far';
-    return null;
-  }
-
-  // 予備:タップで登録
-  function measureAt(d, px, py) {
-    px = Math.round(px); py = Math.round(py);
-    let c = [0, 0, 0], n = 0;
-    for (let y = py - 1; y <= py + 1; y++) for (let x = px - 1; x <= px + 1; x++) { if (x < 0 || y < 0 || x >= PW || y >= PH) continue; const i = (y * PW + x) * 4; c[0] += d[i]; c[1] += d[i + 1]; c[2] += d[i + 2]; n++; }
-    c = c.map(v => v / Math.max(1, n));
-    const seen = new Uint8Array(PW * PH), q = [py * PW + px]; seen[q[0]] = 1; let area = 0, sx = 0, sy = 0;
-    while (q.length && area < 8000) {
-      const k = q.pop(); const x = k % PW, y = (k / PW) | 0; area++; sx += x; sy += y;
-      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-        const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= PW || ny >= PH || Math.hypot(nx - px, ny - py) > 60) continue;
-        const kk = ny * PW + nx; if (seen[kk]) continue; seen[kk] = 1; const p = kk * 4; if (!DETECT.isGreenPx(d[p], d[p + 1], d[p + 2])) q.push(kk);
-      }
-    }
-    return { x: sx / area, y: sy / area, r: clamp(Math.sqrt(area / Math.PI), 2, 60) };
-  }
+  // 置き場所の登録:映像のボールをタップ
   function videoBox() {
-    const W = ov.width, H = ov.height, va = (srcW || 16) / (srcH || 9), ca = W / H;
+    const W = ov.width, H = ov.height, va = (VW || 9) / (VH || 16), ca = W / H;
     if (va > ca) { const h = W / va; return { x: 0, y: (H - h) / 2, w: W, h }; }
     const w = H * va; return { x: (W - w) / 2, y: 0, w, h: H };
   }
   ov.addEventListener('click', (e) => {
-    if (!running || !vid.videoWidth || !needTap) return;
+    if (!running || !sess || sess.state !== 'setup') return;
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    const d = grab(); DETECT.detect(d, PW, PH);
-    const m = measureAt(d, nx * PW, ny * PH);
-    needTap = false; becomeReady(d, m); toast('ボールを登録しました');
+    sess.tap(frameObj, nx * VW, ny * VH); setState('remove');
   });
-  $('retap').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } needTap = true; setDark(false); toSearch(); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
 
-  function params() { const br = Math.max(2, ball.r * S.rad); return { br, area: Math.PI * br * br, CT: 85 * S.sens, DT: 26 / S.sens }; }
-  // ボールの下側(マットに重なる部分)で、ボールの色の画素がどれだけ残っているか
-  function ballFrac(d) {
-    let hit = 0, n = 0; const R = Math.max(1.5, ball.r * 0.8), CT = 85 * S.sens;
-    for (let yy = Math.floor(ball.y - R * 0.4); yy <= ball.y + R; yy++) for (let xx = Math.floor(ball.x - R); xx <= ball.x + R; xx++) {
-      if (xx < 0 || yy < 0 || xx >= PW || yy >= PH || Math.hypot(xx - ball.x, yy - ball.y) > R) continue;
-      const p = (yy * PW + xx) * 4; n++;
-      if (!DETECT.isGreenPx(d[p], d[p + 1], d[p + 2]) && palDist(d, p) < CT) hit++;
-    }
-    return n ? hit / n : 0;
-  }
-  function becomeReady(d, b) {
-    ball = { x: b.x, y: b.y, r: b.r }; lastPresentT = performance.now() / 1000;
-    pal = DETECT.palette(d, PW, PH, ball) || pal;
-    readyFrac = Math.max(0.2, ballFrac(d)); low = 0;
-    // 計測はできるが、もっと良くなる置き方があれば一言添える
-    const tip = ball.y < PH * 0.55 ? 'ボールが画面の下の方に写るようにすると、高く上がる球も追いやすくなります' : '';
-    setState('ready', tip || undefined);
-  }
-  function trackStep(d, t, P) {
-    let pred, wx0, wx1, wy0, wy1;
-    if (!pts.length) { pred = [ball.x, ball.y]; wx0 = ball.x - 16 * P.br; wx1 = ball.x + 16 * P.br; wy0 = ball.y - 16 * P.br; wy1 = ball.y + 1.5 * P.br; }
-    else {
-      const L = pts[pts.length - 1]; let vx = 0, vy = 0;
-      // 1点目しかないときは、止まっていた位置からの動きで速さを見積もる
-      const Q = pts.length >= 2 ? pts[pts.length - 2] : { x: ball.x, y: ball.y, t: lastPresentT };
-      const dt = Math.max(1 / 240, L.t - Q.t); vx = (L.x - Q.x) / dt; vy = (L.y - Q.y) / dt;
-      const dtn = t - L.t; pred = [L.x + vx * dtn, L.y + vy * dtn];
-      const rad = Math.max(6 * P.br, (pts.length >= 2 ? 1.8 : 2.4) * Math.hypot(vx, vy) * dtn);
-      wx0 = pred[0] - rad; wx1 = pred[0] + rad; wy0 = pred[1] - rad; wy1 = Math.min(pred[1] + rad, ball.y + 1.5 * P.br);
-    }
-    wx0 = Math.max(0, Math.floor(wx0)); wx1 = Math.min(PW - 1, Math.ceil(wx1)); wy0 = Math.max(0, Math.floor(wy0)); wy1 = Math.min(PH - 1, Math.ceil(wy1));
-    const W = wx1 - wx0 + 1, H = wy1 - wy0 + 1; if (W <= 0 || H <= 0 || !prev) { lost++; return lost >= 4; }
-    const mask = new Uint8Array(W * H);
-    for (let y = wy0; y <= wy1; y++) for (let x = wx0; x <= wx1; x++) {
-      if (!pts.length && Math.hypot(x - ball.x, y - ball.y) < P.br) continue;
-      const i = (y * PW + x) * 4;
-      const mv = Math.abs(d[i] - prev[i]) + Math.abs(d[i + 1] - prev[i + 1]) + Math.abs(d[i + 2] - prev[i + 2]);
-      if (mv > P.DT && palDist(d, i) < P.CT * 1.25 && !DETECT.isGreenPx(d[i], d[i + 1], d[i + 2])) mask[(y - wy0) * W + (x - wx0)] = 1;
-    }
-    const seen = new Uint8Array(W * H); let best = null;
-    for (let k0 = 0; k0 < W * H; k0++) {
-      if (!mask[k0] || seen[k0]) continue;
-      const q = [k0]; seen[k0] = 1; let n = 0, sx = 0, sy = 0;
-      while (q.length) { const k = q.pop(); const x = k % W, y = (k / W) | 0; n++; sx += x; sy += y;
-        if (x > 0 && mask[k - 1] && !seen[k - 1]) { seen[k - 1] = 1; q.push(k - 1); }
-        if (x < W - 1 && mask[k + 1] && !seen[k + 1]) { seen[k + 1] = 1; q.push(k + 1); }
-        if (y > 0 && mask[k - W] && !seen[k - W]) { seen[k - W] = 1; q.push(k - W); }
-        if (y < H - 1 && mask[k + W] && !seen[k + W]) { seen[k + W] = 1; q.push(k + W); } }
-      if (n < Math.max(3, P.area * 0.12) || n > P.area * 9) continue;
-      const cx = sx / n + wx0, cy = sy / n + wy0, dist = Math.hypot(cx - pred[0], cy - pred[1]);
-      if (!best || dist < best.dist) best = { x: cx, y: cy, dist };
-    }
-    if (best) { pts.push({ t, x: best.x, y: best.y }); lost = 0; }
-    else if (pts.length) lost++;
-    else lost++;
-    const edge = best && (best.x < 2 || best.x > PW - 3 || best.y < 2);
-    return pts.length >= 10 || lost >= 4 || edge || (t - trackStart) > 0.5;
-  }
-  function finishTrack() {
-    const P = params();
-    lastTrack = pts.slice(); lastActive = Date.now();
-    const f = Math.round(fps());
-    if (pts.length < 2) {
-      const tip = f && f < 45 ? `今は約${f}fpsで撮影されています。` : '';
-      setState('error', `飛んでいくボールを追えませんでした。${tip}ボールが画面の下の方に写るように置くと、上がっていく球を長く追えます`);
-      cooldownUntil = performance.now() + 2000; return;
-    }
-    const ppm = (2 * P.br) / (S.diam / 1000), g = 9.81 * ppm, T0 = pts[0].t;
-    const fit = (xs, ys) => { const n = xs.length, mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n; let a = 0, b = 0; for (let i = 0; i < n; i++) { a += (xs[i] - mx) * (ys[i] - my); b += (xs[i] - mx) ** 2; } return b ? a / b : 0; };
-    const use = pts.slice(0, 8), ts = use.map(p => p.t - T0);
-    const vx = fit(ts, use.map(p => p.x)), vy = fit(ts, use.map((p, i) => p.y - 0.5 * g * ts[i] * ts[i]));
-    const mSpeed = Math.hypot(vx, vy) / ppm, mAngle = Math.atan2(-vy, Math.abs(vx)) * 180 / Math.PI;
-    if (!(mSpeed > 0.5 && mSpeed < 60) || mAngle < -10 || mAngle > 80) { setState('error', `計測値が不自然でした(${mSpeed.toFixed(1)}m/s、${mAngle.toFixed(0)}°)。もう一度どうぞ`); cooldownUntil = performance.now() + 2000; return; }
-    const speed = clamp(mSpeed * S.factor, 1, 40), angle = clamp(mAngle + S.angOff, 0, 70);
-    const spin = clamp(Math.round(290 * speed * (0.75 + angle / 120) * S.spin / 50) * 50, 500, 11000);
-    const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: 0, spin };
-    $('cSpeed').textContent = speed.toFixed(1) + ' m/s'; $('cAngle').textContent = angle.toFixed(1) + '°'; $('cSpin').textContent = spin + ' rpm';
-    $('cMeta').textContent = `練習ボールの計測値 ${mSpeed.toFixed(1)} m/s、${mAngle.toFixed(1)}°。追跡 ${pts.length} コマ、約${f}fps`;
+  // ---- 結果 ----
+  const WHY = { none: '飛んでいくボールが見つかりませんでした', short: '追えたコマが少なすぎました', odd: '計測値が不自然でした' };
+  function onResult(res) {
+    lastRes = res; lastActive = Date.now();
+    if (!res.ok) { setState('error', `${WHY[res.why] || '計測できませんでした'}。部屋を明るくし、ボールの上側の背景がボールと違う色になるようにしてください`); cooldownUntil = performance.now() + 2000; return; }
+    // 長く追えたときは、そのボールの空気抵抗の倍率を少しずつ合わせる
+    if (res.dragFit && res.dragRms < 1.3 * res.rms + 0.5) { S.drag = +clamp(S.drag * 0.7 + res.dragFit * 0.3, 0.3, 2.5).toFixed(3); store.set('drag', S.drag); showDrag(); }
+    const cv = PHYS.plasticLaunch(res.speed, res.angle, { massG: S.mass, diamMM: S.diam, cor: S.cor, attack: S.attack });
+    const speed = clamp(res.speed, 0.5, 40), angle = clamp(res.angle, 0, 80), spin = clamp(Math.round(cv.spin / 10) * 10, 0, 12000);
+    const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: +clamp(res.dir, -30, 30).toFixed(1), axis: +clamp(res.axis || 0, -35, 35).toFixed(1), spin,
+      club: +cv.clubSpeed.toFixed(2), loft: +cv.spinLoft.toFixed(1), massG: S.mass, diamMM: S.diam, drag: S.drag };
+    lastShot = shot; $('carryFix').hidden = false;
+    $('cSpeed').textContent = speed.toFixed(1) + ' m/s'; $('cAngle').textContent = angle.toFixed(1) + '°';
+    $('cDir').textContent = (shot.dir > 0.4 ? '右' : shot.dir < -0.4 ? '左' : '') + Math.abs(shot.dir).toFixed(1) + '°'; $('cSpin').textContent = spin + ' rpm';
+    const f = ftimes.length > 10 ? Math.round((ftimes.length - 1) / (ftimes[ftimes.length - 1] - ftimes[0])) : 0;
+    $('cMeta').textContent = `クラブ速度 ${cv.clubSpeed.toFixed(1)} m/s(推定)、回転軸の傾き ${shot.axis}°、追跡 ${res.n} コマ・約${f}fps、当てはめの誤差 ${res.rms.toFixed(1)}px、空気抵抗の補正 ×${S.drag.toFixed(2)}`;
     $('camResult').hidden = false;
     const ok = Net.send(shot);
     setState('done', ok ? 'iPadを見てください' : 'iPadと未接続のため送れていません');
-    cooldownUntil = performance.now() + 2500;
+    cooldownUntil = performance.now() + 1500;
   }
 
   function drawOverlay() {
     const r = ov.getBoundingClientRect(); const W = Math.round(r.width * devicePixelRatio), H = Math.round(r.height * devicePixelRatio);
     if (ov.width !== W || ov.height !== H) { ov.width = W; ov.height = H; }
     octx.clearRect(0, 0, W, H);
-    const b = videoBox(), sx = b.w / PW, sy = b.h / PH, dpr = devicePixelRatio;
-    const p = ball || cand;
-    if (p) {
+    const b = videoBox(), sx = b.w / VW, sy = b.h / VH, dpr = devicePixelRatio;
+    const t = sess && (sess.ball || sess.tee);
+    if (t && t.r) {
       octx.strokeStyle = state === 'ready' ? '#1f9d55' : state === 'adjust' ? '#d63a2a' : '#ffd24a'; octx.lineWidth = 3 * dpr;
-      octx.beginPath(); octx.arc(b.x + p.x * sx, b.y + p.y * sy, p.r * sx + 5 * dpr, 0, Math.PI * 2); octx.stroke();
+      octx.beginPath(); octx.arc(b.x + t.x * sx, b.y + t.y * sy, t.r * sx + 6 * dpr, 0, Math.PI * 2); octx.stroke();
     }
-    const tr = state === 'track' ? pts : (performance.now() < cooldownUntil ? lastTrack : null);
-    if (tr) { octx.fillStyle = '#d63a2a'; tr.forEach(q => { octx.beginPath(); octx.arc(b.x + q.x * sx, b.y + q.y * sy, 5 * dpr, 0, Math.PI * 2); octx.fill(); }); }
-    if (needTap) {
+    const tr = state === 'track' ? sess.obs : (performance.now() < cooldownUntil + 1500 && lastRes ? lastRes.obs : null);
+    if (tr) { octx.fillStyle = '#d63a2a'; tr.forEach(q => { octx.beginPath(); octx.arc(b.x + q.u * sx, b.y + q.v * sy, 3 * dpr, 0, Math.PI * 2); octx.fill(); }); }
+    if (sess && sess.state === 'setup') {
       octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(0, H - 44 * dpr, W, 44 * dpr);
       octx.fillStyle = '#fff'; octx.font = `${15 * dpr}px sans-serif`; octx.textAlign = 'center';
-      octx.fillText('止まっているボールをタップしてください', W / 2, H - 16 * dpr);
+      octx.fillText('置いたボールをタップしてください', W / 2, H - 16 * dpr);
     }
   }
 
+  const EVS = { remove: 'remove', teeset: 'wait', empty: 'wait', notempty: 'clear', tapfail: 'setup', track: 'track', lostball: 'wait' };
   function frame(t) {
-    frameN++;
     ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
-    if (vid.videoWidth !== srcW || vid.videoHeight !== srcH) { setupProc(); toSearch(); }   // 向きが変わった
-    const busy = state === 'ready' || state === 'track';
-    // ボールを探している間は2コマに1回だけ解析して、発熱を抑える
-    if (!busy && frameN % 2 !== 0) return;
-    const d = grab();
-    if (state === 'track') { if (trackStep(d, t, params())) finishTrack(); }
-    else if (performance.now() < cooldownUntil) { /* 結果表示中 */ }
-    else if (state === 'ready') {
-      const f = ballFrac(d);
-      // ボールの色が消えたコマ=打った瞬間。そのコマから追跡を始める
-      if (f < readyFrac * 0.4) { setState('track'); trackStart = t; pts = []; lost = 0; if (trackStep(d, t, params())) finishTrack(); }
-      else lastPresentT = t;
-    } else if (!needTap) {
-      const c = DETECT.detect(d, PW, PH);
-      if (c && cand && Math.hypot(c.x - cand.x, c.y - cand.y) < Math.max(1.2, 0.3 * c.r) && Math.abs(c.r - cand.r) < 0.25 * cand.r) stable++;
-      else stable = 0;
-      cand = c;
-      if (!c) { if (state !== 'search') toSearch(); }
-      else if (stable >= STABLE) {
-        issue = setupIssue(c);
-        if (issue) { if (state !== 'adjust' || lastSent !== 'adjust' + issue) setState('adjust'); }
-        else becomeReady(d, c);
-      }
-    }
-    prev = d;
+    if (vid.videoWidth !== VW || vid.videoHeight !== VH) { VW = vid.videoWidth; VH = vid.videoHeight; newSession(); }
+    if (performance.now() < cooldownUntil) { if (!dark) drawOverlay(); return; }
+    if (state === 'done' || state === 'error') setState(sess.state === 'ready' ? 'ready' : 'wait');
+    const ev = sess.feed(frameObj, t);
+    if (ev) {
+      if (ev.ev === 'teeset' || ev.ev === 'empty') { const tt = Object.assign({}, sess.tee, { thumb: ev.thumb || (ev.tee && ev.tee.thumb) || sess.thumb }); store.set(teeKey(), tt); }
+      if (ev.ev === 'teeset') toast('置き場所を覚えました');
+      if (ev.ev === 'ready') {
+        issue = VW > VH ? 'landscape' : ev.issue || null;
+        if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
+      } else if (ev.ev === 'result') onResult(ev.res);
+      else if (EVS[ev.ev] && state !== EVS[ev.ev]) setState(EVS[ev.ev]);
+    } else if (sess.state === 'ready' && state !== 'ready' && state !== 'adjust') setState('ready');
+    else if (sess.state === 'wait' && state === 'ready') setState('wait');
     if (!dark) drawOverlay();
   }
   function loop() {
@@ -871,6 +1164,7 @@ const World = (() => {
   }
   function load(c) {
     init(); course = c; seed = 7;
+    const K = c.scale || 1;                                   // コースの縮小率(縁取りの幅などに使う)
     if (root) { scene.remove(root); root.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
     root = new THREE.Group();
     const T = textures();
@@ -879,10 +1173,10 @@ const World = (() => {
     const chasms = c.shapes.filter(s => s.type === 'chasm');
     chasms.forEach(s => g.holes.push(shapeOf(s)));
     root.add(flat(g, 0, lam({ map: T.rough })));
-    if (c.allGreen) root.add(flat(shapeOf({ kind: 'rect', x0: -8, x1: c.pin.x + 24, z0: -30, z1: 30 }), 0.004, lam({ map: T.green })));
-    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => { root.add(flat(shapeOf(s, 0.8), 0.006, lam({ map: T.fringe }))); root.add(flat(shapeOf(s), 0.008, lam({ map: T.fairway }))); });
+    if (c.allGreen) root.add(flat(shapeOf({ kind: 'rect', x0: -5, x1: c.pin.x + 12, z0: -14, z1: 14 }), 0.004, lam({ map: T.green })));
+    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => { root.add(flat(shapeOf(s, 0.8 * K), 0.006, lam({ map: T.fringe }))); root.add(flat(shapeOf(s), 0.008, lam({ map: T.fairway }))); });
     c.shapes.filter(s => s.type === 'water').forEach(s => {
-      root.add(flat(shapeOf(s, 0.9), 0.012, lam({ color: '#b8a57a' })));
+      root.add(flat(shapeOf(s, 0.9 * K), 0.012, lam({ color: '#b8a57a' })));
       root.add(flat(shapeOf(s), 0.016, new THREE.MeshPhongMaterial({ map: T.water, shininess: 90, specular: '#cfeaff' })));
     });
     c.shapes.filter(s => s.top && s.type === 'rough').forEach(s => root.add(flat(shapeOf(s), 0.02, lam({ map: T.rough, color: '#c8d8b8' }))));
@@ -890,7 +1184,7 @@ const World = (() => {
     const greens = c.shapes.filter(s => s.type === 'green');
     greens.forEach(s => {
       const inWater = c.shapes.some(w => w.type === 'water' && SIM.inShape(w, s.cx, s.cz));
-      if (!inWater) root.add(flat(shapeOf(s, 1.2), 0.03, lam({ map: T.fringe })));
+      if (!inWater) root.add(flat(shapeOf(s, 1.2 * K), 0.03, lam({ map: T.fringe })));
       root.add(flat(shapeOf(s), 0.036, lam({ map: T.green })));
     });
     chasms.forEach(s => {
@@ -906,10 +1200,10 @@ const World = (() => {
     // trees (instanced) outside play areas
     const bb = bounds(c), spots = [];
     for (let i = 0; i < 700 && spots.length < 120; i++) {
-      const x = rand(bb.x0 - 30, bb.x1 + 30), z = rand(bb.z0 - 30, bb.z1 + 30);
+      const x = rand(bb.x0 - 22, bb.x1 + 22), z = rand(bb.z0 - 22, bb.z1 + 22);
       let ok = true;
-      for (const [dx, dz] of [[0, 0], [9, 0], [-9, 0], [0, 9], [0, -9], [6, 6], [-6, -6], [6, -6], [-6, 6]]) { const zn = SIM.zoneAt(c, x + dx, z + dz); if (zn !== 'rough' || (c.allGreen && Math.abs(z) < 34 && x < c.pin.x + 28)) { ok = false; break; } }
-      if (ok && Math.hypot(x, z) > 10) spots.push([x, z, rand(0.8, 1.5)]);
+      for (const [dx, dz] of [[0, 0], [7, 0], [-7, 0], [0, 7], [0, -7], [5, 5], [-5, -5], [5, -5], [-5, 5]]) { const zn = SIM.zoneAt(c, x + dx, z + dz); if (zn !== 'rough' || (c.allGreen && Math.abs(z) < 16 && x < c.pin.x + 14)) { ok = false; break; } }
+      if (ok && Math.hypot(x, z) > 9) spots.push([x, z, rand(0.55, 1.0)]);
     }
     const coneG = new THREE.ConeGeometry(2.2, 6.5, 7), trunkG = new THREE.CylinderGeometry(0.25, 0.35, 2, 6);
     const leaves = new THREE.InstancedMesh(coneG, lam({ color: '#27572b', flatShading: true }), spots.length * 2);
@@ -923,16 +1217,19 @@ const World = (() => {
     leaves.castShadow = true; trunks.castShadow = true; root.add(leaves, trunks);
     // cup, flag, 2m OK circle
     const P = c.pin;
-    const okFill = new THREE.Mesh(new THREE.CircleGeometry(2, 72), new THREE.MeshBasicMaterial({ color: '#fff3a0', transparent: true, opacity: .2 }));
+    const OK = c.okR || 0;
+    if (OK > 0) {
+    const okFill = new THREE.Mesh(new THREE.CircleGeometry(OK, 72), new THREE.MeshBasicMaterial({ color: '#fff3a0', transparent: true, opacity: .2 }));
     okFill.rotation.x = -Math.PI / 2; okFill.position.set(P.x, 0.042, P.z); root.add(decal(okFill, 42));
-    const okRing = new THREE.Mesh(new THREE.RingGeometry(1.92, 2.08, 96), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .95, side: THREE.DoubleSide }));
+    const okRing = new THREE.Mesh(new THREE.RingGeometry(OK - 0.04, OK + 0.04, 96), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .95, side: THREE.DoubleSide }));
     okRing.rotation.x = -Math.PI / 2; okRing.position.set(P.x, 0.046, P.z); root.add(decal(okRing, 46));
+    }
     const cup = new THREE.Mesh(new THREE.CircleGeometry(0.054, 24), new THREE.MeshBasicMaterial({ color: '#0c0c0c' })); cup.rotation.x = -Math.PI / 2; cup.position.set(P.x, 0.05, P.z); root.add(decal(cup, 50));
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 2.2, 8), lam({ color: '#f4f4f4' })); pole.position.set(P.x, 1.1, P.z); pole.castShadow = true; root.add(pole);
     const flagG = new THREE.PlaneGeometry(0.6, 0.38, 6, 1); const fp = flagG.attributes.position; for (let i = 0; i < fp.count; i++) { const x = fp.getX(i) + 0.3; fp.setZ(i, Math.sin(x * 6) * 0.05 * x); }
     const flag = new THREE.Mesh(flagG, lam({ color: '#e0412a', side: THREE.DoubleSide })); flag.position.set(P.x, 1.98, P.z + 0.3); flag.rotation.y = Math.PI / 2; flag.castShadow = true; root.add(flag);
     // tee mat
-    const tee = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.04, 1.6), lam({ color: '#1d4a2a' })); tee.position.set(c.tee.x, 0.02, c.tee.z); tee.receiveShadow = true; root.add(tee);
+    const tee = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.03, 1.0), lam({ color: '#1d4a2a' })); tee.position.set(c.tee.x, 0.02, c.tee.z); tee.receiveShadow = true; root.add(tee);
     scene.add(root);
     markerGroup.clear(); clearTrails(); ballsGroup.clear(); aimGroup.clear();
     placeBall(c.tee.x, 0, c.tee.z);
@@ -970,12 +1267,12 @@ const World = (() => {
     const dx = Math.cos(heading), dz = Math.sin(heading);
     if (viewMode === 'top') {
       const P = course.pin, cx = (focus.x + P.x) / 2, cz = (focus.z + P.z) / 2;
-      const d = Math.max(Math.hypot(P.x - focus.x, P.z - focus.z), reach, 12);
+      const d = Math.max(Math.hypot(P.x - focus.x, P.z - focus.z), reach, 6);
       const h = d * 1.1 + 6;
       camPos.set(cx - dx * h * 0.3, h, cz - dz * h * 0.3); camLook.set(cx, 0, cz);
     } else {
-      const L = Math.min(reach, Math.max(8, Math.hypot(course.pin.x - focus.x, course.pin.z - focus.z))) * 0.75;
-      camPos.set(focus.x - dx * 4.8, 2.0, focus.z - dz * 4.8); camLook.set(focus.x + dx * L, 0, focus.z + dz * L);
+      const L = Math.min(reach, Math.max(4, Math.hypot(course.pin.x - focus.x, course.pin.z - focus.z))) * 0.75;
+      camPos.set(focus.x - dx * 3.4, 1.35, focus.z - dz * 3.4); camLook.set(focus.x + dx * L, 0, focus.z + dz * L);
     }
     dirty = true;
   }
@@ -1013,7 +1310,7 @@ const World = (() => {
       anim.tube.geometry.setDrawRange(0, Math.floor(frac * anim.seg) * anim.rad * 6);
       if (anim.res._ring && t >= anim.res.carryT) anim.res._ring.material.opacity = 0.9;
       if (progressCb) progressCb(anim.res, frac);
-      if (viewMode === 'follow') { const s = pts[0], e = pts[Math.min(i + 3, pts.length - 1)]; let dx = e[1] - s[1], dz = e[3] - s[3]; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L; if (L < 0.5) { dx = Math.cos(heading); dz = Math.sin(heading); } camPos.set(x - dx * 5.5, Math.max(1.6, y + 1.8), z - dz * 5.5); camLook.set(x + dx * 2, Math.max(0, y) * 0.6, z + dz * 2); }
+      if (viewMode === 'follow') { const s = pts[0], e = pts[Math.min(i + 3, pts.length - 1)]; let dx = e[1] - s[1], dz = e[3] - s[3]; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L; if (L < 0.5) { dx = Math.cos(heading); dz = Math.sin(heading); } camPos.set(x - dx * 3.6, Math.max(1.1, y + 1.2), z - dz * 3.6); camLook.set(x + dx * 1.5, Math.max(0, y) * 0.6, z + dz * 1.5); }
       if (t >= anim.res.duration + 0.05) {
         // 飛び終わった弾道は細い線に置き換えて、次の打席の邪魔にしない
         const tube = anim.tube, color = tube.material.color.clone();
@@ -1048,328 +1345,156 @@ const Profile = (() => {
     if (!cur) return;
     const r = cur.res, p = r.pts, s = p[0];
     const hx = (q) => Math.hypot(q[1] - s[1], q[3] - s[3]);
-    const maxD = Math.max(yd(r.total) * 1.12, 10), maxH = Math.max(r.apex * 1.3, 2);
-    const X = (m) => pad + (yd(m) / maxD) * (W - 2 * pad), Y = (h) => base - (Math.max(h, 0) / maxH) * (base - 22 * dpr);
+    const maxD = Math.max(r.total * 1.12, 4.5), maxH = Math.max(r.apex * 1.3, 0.6);
+    const X = (m) => pad + (m / maxD) * (W - 2 * pad), Y = (h) => base - (Math.max(h, 0) / maxH) * (base - 22 * dpr);
     const n = Math.max(1, Math.floor(cur.frac * (p.length - 1)));
     ctx.strokeStyle = '#d63a2a'; ctx.lineWidth = 2.4 * dpr; ctx.setLineDash([]); ctx.beginPath();
     for (let i = 0; i <= n; i++) { const q = p[i]; i ? ctx.lineTo(X(hx(q)), Y(q[2])) : ctx.moveTo(X(hx(q)), Y(q[2])); }
     ctx.stroke();
-    ctx.fillStyle = '#16301f'; ctx.font = `700 ${12 * dpr}px "Avenir Next Condensed","Arial Narrow",sans-serif`;
+    ctx.fillStyle = '#16301f'; ctx.fillRect(X(App.pin()) - 1 * dpr, base - 10 * dpr, 2 * dpr, 10 * dpr);
+    ctx.font = `700 ${12 * dpr}px "Avenir Next Condensed","Arial Narrow",sans-serif`;
     if (cur.frac >= 1) {
       ctx.fillStyle = '#d63a2a'; ctx.beginPath(); ctx.arc(X(r.carry), base, 3.5 * dpr, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#16301f'; ctx.textAlign = 'center';
-      ctx.fillText(`キャリー ${fy(r.carry)}yd`, clamp(X(r.carry), 50 * dpr, W - 50 * dpr), H - 4 * dpr);
-      ctx.textAlign = 'right'; ctx.fillText(`最高 ${r.apex.toFixed(1)}m`, W - pad, 13 * dpr);
+      ctx.fillText(`キャリー ${r.carry.toFixed(2)}m`, clamp(X(r.carry), 50 * dpr, W - 50 * dpr), H - 4 * dpr);
+      ctx.textAlign = 'right'; ctx.fillText(`最高 ${r.apex.toFixed(1)}m  落下角 ${Math.round(r.landAngle || 0)}°`, W - pad, 13 * dpr);
     }
   }
   return { draw, clear: () => { cur = null; draw(null, 0); } };
 })();
 
 /* ======================================================================
-   APP (iPad): home, free practice, course play
+   APP (iPad): 3.45m先のカップを狙う、1ホールだけのアプローチゲーム
    ====================================================================== */
 const App = (() => {
-  let limit = store.get('limit', 35), nPlayers = store.get('np', 1);
-  const names = [store.get('name0', 'プレイヤー1'), store.get('name1', 'プレイヤー2')];
-  const COLORS = ['#e2432f', '#2d6fd1'];
-  let G = null, readyState = 'off', paired = false;
+  // 部屋と同じ配置:ボールから2.63m先でグリーンが始まり、5.41m先にカップ(設定で変えられる)
+  let PIN_M = clamp(store.get('pinM', 5.41), 1, 15), GREEN0 = clamp(store.get('green0', 2.63), 0.3, 14);
+  let lie = store.get('lie', 'マット') === 'ラフ' ? 'ラフ' : 'マット';
+  let COURSE = null;
+  function buildCourse() {
+    const g0 = Math.min(GREEN0, PIN_M - 0.3), gEnd = PIN_M + 0.9;
+    COURSE = {
+      id: 'cup', par: 0, pin: { x: PIN_M, z: 0 }, stimp: 10, slope: { x: 0, z: 0 }, route: [], tee: { x: 0, z: 0 }, okR: 0, scale: 0.12,
+      shapes: [
+        { type: 'green', kind: 'ellipse', cx: (g0 + gEnd) / 2, cz: 0, rx: (gEnd - g0) / 2, rz: 1.2 },
+        { type: 'fairway', kind: 'rect', x0: -0.6, x1: g0 + 0.2, z0: -0.75, z1: 0.75 }
+      ]
+    };
+  }
+  buildCourse();
+  let readyState = 'off', paired = false, busy = false;
+  let log = store.get('cupLog', []);                          // {d: ピンまで[m], in: true/false}
   const seen = new Set();
-  const limitM = () => limit * YD;
-  const freeReach = () => (G && G.yd ? G.yd + 3 : 30) * YD;
-  const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
-  const headingTo = (a, b) => Math.atan2(b.z - a.z, b.x - a.x);
+  const fCm = (m) => m < 1 ? `${Math.round(m * 100)}cm` : `${m.toFixed(2)}m`;
+  let ballSet = store.get('ballSet', { massG: 5, diamMM: 42, drag: 1 });
   World.onProgress((res, frac) => Profile.draw(res, frac));
 
-  /* ---- home ---- */
-  function initHome() {
-    [...$('limitSeg').children].forEach(b => { b.setAttribute('aria-pressed', +b.dataset.v === limit); b.onclick = () => { limit = +b.dataset.v; store.set('limit', limit); initHome(); }; });
-    const u = COURSES.unitYd(limit);
-    $('limitNote').textContent = `ホールの長さ:パー2 ${u}ヤード/パー3 ${u * 2}ヤード/パー4 ${u * 3}ヤード`;
-    $('soundOn').checked = Sound.on(); $('soundOn').onchange = () => store.set('sound', $('soundOn').checked);
-    setReady(readyState); setPaired(paired); paintAll($('homeView'));
-  }
-  function setPaired(p) { paired = p; $('gs1').classList.toggle('done', p); if (!p) $('gs2').classList.remove('done'); }
-  $('goFree').onclick = () => { buildDist(); show('freeView'); };
-  $('goCourse').onclick = () => { buildCourses(); show('courseView'); };
-  document.querySelectorAll('[data-back]').forEach(b => { b.onclick = () => { show('homeView'); initHome(); }; });
-
-  function buildDist() {
-    const g = $('distGrid'); g.textContent = '';
-    [5, 10, 15, 20, 25, 30, 35, 40, 45, 60].forEach(d => {
-      const b = el('button', d === 60 ? 'strong' : null); b.append(el('b', null, String(d)), el('small', null, d === 60 ? 'ヤード 強めに打つ練習' : 'ヤード'));
-      b.onclick = () => startFree(d); g.append(b);
-    });
-  }
-  function buildCourses() {
-    [...$('playerSeg').children].forEach(b => { b.setAttribute('aria-pressed', +b.dataset.v === nPlayers); b.onclick = () => { nPlayers = +b.dataset.v; store.set('np', nPlayers); buildCourses(); }; });
-    $('name1wrap').hidden = nPlayers < 2;
-    [0, 1].forEach(i => { const inp = $('name' + i); inp.value = names[i]; inp.oninput = () => { names[i] = inp.value.trim() || `プレイヤー${i + 1}`; store.set('name' + i, names[i]); }; });
-    const g = $('courseGrid'); g.textContent = '';
-    COURSES.defs.forEach(d => {
-      const c = COURSES.make(d.id, limit);
-      const b = el('button', 'ccard');
-      const art = el('span', 'art'); paintArt(art, d.id);
-      const cv = document.createElement('canvas'); cv.width = 300; cv.height = 400; drawMini(cv, c); art.append(cv);
-      const body = el('span', 'cbody');
-      const stat = el('span', 'stat');
-      const s1 = el('span'); s1.append('パー ', el('strong', null, String(c.par)));
-      const s2 = el('span'); s2.append(el('strong', null, String(c.lengthYd)), ' ヤード');
-      stat.append(s1, s2);
-      body.append(el('b', null, c.name), stat, el('span', 'style' + (d.style === 'テクニカル' ? ' tech' : ''), d.style), el('span', 'd', c.desc));
-      b.append(art, body);
-      b.onclick = () => startCourse(d.id);
-      g.append(b);
-    });
-  }
-  // 上から見たコース図(ティーが下、ピンが上)
-  function drawMini(cv, c) {
-    const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
-    let minX = -6, maxX = c.pin.x + 10, minZ = -12, maxZ = 12;
-    const ext = (x, z) => { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z); };
-    c.shapes.forEach(s => { if (s.kind === 'ellipse') { ext(s.cx - s.rx, s.cz - s.rz); ext(s.cx + s.rx, s.cz + s.rz); } else if (s.kind === 'rect') { ext(s.x0, s.z0); ext(s.x1, s.z1); } else s.pts.forEach(([x, z]) => ext(x, z)); });
-    minZ = Math.max(minZ, -70); maxZ = Math.min(maxZ, 70); maxX = Math.min(maxX, c.pin.x + 14); minX = Math.max(minX, -6);
-    const sc = Math.min((H - 40) / (maxX - minX), (W - 28) / (maxZ - minZ));
-    const ox = W / 2 - ((minZ + maxZ) / 2) * sc, oy = H - 14 + minX * sc;
-    const P = (x, z) => [ox + z * sc, oy - x * sc];
-    ctx.fillStyle = '#fbfaf5'; ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = 'rgba(22,48,31,.08)'; ctx.lineWidth = 1;
-    for (let y = 0; y < H; y += 14) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
-    const path = (s, grow) => { ctx.beginPath(); const g2 = grow || 0; if (s.kind === 'ellipse') { const [x, y] = P(s.cx, s.cz); ctx.ellipse(x, y, Math.max(1, (s.rz + g2) * sc), Math.max(1, (s.rx + g2) * sc), 0, 0, Math.PI * 2); } else if (s.kind === 'rect') { const [x0, y0] = P(s.x1, s.z0), [x1, y1] = P(s.x0, s.z1); ctx.rect(x0, y0, x1 - x0, y1 - y0); } else { s.pts.forEach(([x, z], i) => { const [a, b] = P(x, z); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.closePath(); } };
-    const draw = (s, fill, stroke, grow) => { path(s, grow); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke(); } };
-    c.shapes.filter(s => s.type === 'fairway' && !s.top).forEach(s => draw(s, '#cfe6bf', '#5d8f58'));
-    c.shapes.filter(s => s.type === 'water').forEach(s => draw(s, '#bcdcf0', '#3f82b5'));
-    c.shapes.filter(s => s.type === 'chasm').forEach(s => { draw(s, '#e9e1d4', '#6b5540'); path(s); ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(107,85,64,.55)'; for (let k = -H; k < W + H; k += 6) { ctx.beginPath(); ctx.moveTo(k, 0); ctx.lineTo(k + H, H); ctx.stroke(); } ctx.restore(); });
-    c.shapes.filter(s => s.top && s.type === 'rough').forEach(s => draw(s, '#e8efe0', '#8aa37f'));
-    c.shapes.filter(s => s.top && s.type === 'fairway').forEach(s => draw(s, '#cfe6bf', '#5d8f58'));
-    c.shapes.filter(s => s.type === 'green').forEach(s => { draw(s, '#a9d690', '#2f6b3a'); for (const k of [0.35, 0.65]) { path({ ...s, rx: s.rx * k, rz: s.rz * k }); ctx.strokeStyle = 'rgba(47,107,58,.45)'; ctx.lineWidth = 1; ctx.stroke(); } });
-    const [px, py] = P(c.pin.x, c.pin.z), [tx, ty] = P(0, 0);
-    ctx.strokeStyle = '#16301f'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(tx, ty);
-    c.route.filter(r => !c.shapes.some(s => s.island && SIM.inShape(s, r.x, r.z))).forEach(r => { const [x, y] = P(r.x, r.z); ctx.lineTo(x, y); }); ctx.lineTo(px, py); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#16301f'; ctx.fillRect(tx - 6, ty - 3, 12, 6);
-    ctx.strokeStyle = '#16301f'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py - 16); ctx.stroke();
-    ctx.fillStyle = '#d63a2a'; ctx.beginPath(); ctx.moveTo(px, py - 16); ctx.lineTo(px + 10, py - 12.5); ctx.lineTo(px, py - 9); ctx.fill();
-    ctx.fillStyle = '#16301f'; ctx.font = '600 15px "Avenir Next Condensed","Arial Narrow",sans-serif'; ctx.textAlign = 'left'; ctx.fillText(`${c.lengthYd}Y`, 8, 18);
-  }
-
-  /* ---- play common ---- */
-  function enterPlay(mode) {
+  function start() {
     show('playView');
-    $('sideFree').hidden = mode !== 'free'; $('sideCourse').hidden = mode !== 'course';
-    $('aimBar').hidden = mode !== 'course'; $('resultBox').hidden = true; $('banner').hidden = true;
-    ['gSpeed', 'gAngle', 'gSpin', 'gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '–'; }); $('gPinU').textContent = '';
-    Profile.clear();
-    setReady(readyState);
+    World.load(COURSE); World.setAim(COURSE.tee, 0, PIN_M + 0.6);
+    World.onTap(null);
+    render(); setReady(readyState);
   }
+  function setPaired(p) {
+    paired = p;
+    $('connectCard').classList.toggle('paired', p);
+    $('pairNote').textContent = p ? 'iPhoneとつながっています' : 'iPhoneのカメラアプリでQRコードを読み取ってください';
+  }
+
   function banner(t, sub, ms, kind) {
     const b = $('banner'); b.textContent = t; if (sub) b.append(el('small', null, sub)); b.className = 'banner' + (kind ? ' ' + kind : ''); b.hidden = false;
     clearTimeout(banner._t); if (ms) banner._t = setTimeout(() => { b.hidden = true; }, ms);
   }
-  function showShotStart(shot) { $('gSpeed').textContent = shot.speed.toFixed(1); $('gAngle').textContent = shot.angle.toFixed(1); $('gSpin').textContent = String(Math.round(shot.spin)); ['gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '…'; }); $('gPinU').textContent = ''; $('banner').hidden = true; }
-  function showShotEnd(res) {
-    $('gCarry').textContent = fy(res.carry); $('gTotal').textContent = fy(res.total);
-    if (res.hazard) { $('gPin').textContent = '–'; $('gPinU').textContent = ''; }
-    else if (res.holed) { $('gPin').textContent = 'IN'; $('gPinU').textContent = ''; }
-    else if (res.toPin < 1) { $('gPin').textContent = String(Math.round(res.toPin * 100)); $('gPinU').textContent = 'cm'; }
-    else { $('gPin').textContent = res.toPin.toFixed(1); $('gPinU').textContent = 'm'; }
-  }
-  function simulate(s, c, start, hd) {
-    const res = SIM.simulate(s, c, start, hd);
+  function simulate(s) {
+    if (s.massG) { ballSet = { massG: s.massG, diamMM: s.diamMM, drag: s.drag }; store.set('ballSet', ballSet); }
+    // ラフから打つと、フェースとボールの間に芝が挟まってスピンが減る
+    const sh = Object.assign({}, s, { spin: lie === 'ラフ' ? s.spin * 0.5 : s.spin });
+    const res = SIM.simulate(sh, COURSE, COURSE.tee, 0, PHYS.plasticProfile({ massG: ballSet.massG, diamMM: ballSet.diamMM, dragScale: ballSet.drag }));
     let apex = 0, carryT = res.duration; for (const p of res.pts) if (p[2] > apex) apex = p[2];
-    // 着弾点(最初に地面に触れた点)
     for (let i = 1; i < res.pts.length; i++) if (res.pts[i][2] <= 0.001 && res.pts[i - 1][2] > 0.001) { carryT = res.pts[i][0]; res.carryPt = { x: res.pts[i][1], z: res.pts[i][3] }; break; }
-    res.apex = apex; res.carryT = carryT; res.hazardAtLanding = res.hazard && res.pts.length < 3;
+    res.apex = apex; res.carryT = carryT;
     return res;
   }
-
-  /* ---- free practice ---- */
-  function startFree(d) {
-    const c = COURSES.practice(d);
-    G = { mode: 'free', yd: d, course: c, shots: [], busy: false };
-    enterPlay('free');
-    World.load(c); World.setAim(c.tee, 0, freeReach());
-    $('hTitle').textContent = 'フリー練習'; $('hMain').textContent = `${d}ヤード`; $('hExtra').textContent = `全面グリーン、速さ${c.stimp}フィート`;
-    $('hTurn').textContent = 'ピンまで'; $('hSub').textContent = `${d} yd`; $('hLie').textContent = 'マットから打つ'; $('hLie').className = 's';
-    World.onTap(null);
-    renderFree(); sendInfo();
-  }
-  function afterFree(res) {
-    const ok = res.holed || res.toPin <= 2;
-    G.shots.push({ total: res.total, toPin: res.toPin, ok, holed: res.holed });
-    World.addMarker(res.end.x, res.end.z, ok ? '#ffd24a' : '#ffffff');
-    if (res.holed) { banner('カップイン!', null, 2600, 'good'); Sound.good(); }
-    else if (ok) { banner('OK!', `ピンまで ${fDist(res.toPin)}`, 2600, 'good'); Sound.good(); }
-    else banner(`ピンまで ${fDist(res.toPin)}`, null, 2000);
-    renderFree();
-    setTimeout(() => { if (G && G.mode === 'free') { World.setAim(G.course.tee, 0, freeReach()); G.busy = false; } }, 1600);
-  }
-  function renderFree() {
-    const s = G.shots, n = s.length;
-    $('fsN').textContent = n;
-    $('fsOk').textContent = n ? `${Math.round(s.filter(x => x.ok).length / n * 100)}%` : '–';
-    $('fsAvg').textContent = n ? fDist(s.reduce((a, b) => a + b.toPin, 0) / n) : '–';
-    $('fsBest').textContent = n ? fDist(Math.min(...s.map(x => x.toPin))) : '–';
-    const t = $('freeLog'); t.textContent = '';
-    const hr = el('tr'); ['#', '総距離', 'ピンまで', ''].forEach((h, i) => hr.append(el('th', i ? 'n' : null, h))); t.append(hr);
-    if (!n) { const r = el('tr'); const c = el('td', 'empty', '画面上に「打ってOK」が出たら打ってみましょう。'); c.colSpan = 4; r.append(c); t.append(r); }
-    s.map((x, i) => [x, i]).reverse().forEach(([x, i]) => {
-      const r = el('tr');
-      r.append(el('td', null, String(i + 1)), el('td', 'n', fy(x.total) + 'yd'), el('td', 'n', x.holed ? 'IN' : fDist(x.toPin)), el('td', 'n' + (x.ok ? ' good' : ''), x.ok ? 'OK' : ''));
-      t.append(r);
-    });
-  }
-  $('changeDist').onclick = () => { buildDist(); show('freeView'); };
-
-  /* ---- course ---- */
-  let lastCourseId = null, routeIdx = 0;
-  function startCourse(id) {
-    lastCourseId = id;
-    const c = COURSES.make(id, limit);
-    const players = [];
-    for (let i = 0; i < nPlayers; i++) players.push({ name: names[i], color: COLORS[i], cls: 'c' + (i + 1), pos: { ...c.tee }, strokes: 0, done: false, score: null, log: [] });
-    G = { mode: 'course', course: c, players, cur: 0, aim: 0, busy: false };
-    enterPlay('course');
-    World.load(c);
-    $('hTitle').textContent = `パー${c.par}  ${c.lengthYd}ヤード`; $('hMain').textContent = c.name; $('hExtra').textContent = `上限${limit}ヤード`;
-    $('aimRoute').hidden = !c.route.length;
-    World.onTap((x, z) => { if (!G || G.mode !== 'course' || G.busy) return; const p = G.players[G.cur]; if (Math.hypot(x - p.pos.x, z - p.pos.z) < 1) return; G.aim = headingTo(p.pos, { x, z }); World.setAim(p.pos, G.aim, limitM()); });
-    beginTurn();
-  }
-  const lieOf = (pos) => SIM.zoneAt(G.course, pos.x, pos.z) === 'rough' ? '絨毯' : 'マット';
-  function nextPlayer() { let bi = -1, bd = -1; G.players.forEach((p, i) => { if (p.done) return; const d = dist(p.pos, G.course.pin); if (d > bd + 0.01) { bd = d; bi = i; } }); return bi; }
-  function beginTurn() {
-    const i = nextPlayer();
-    if (i < 0) { finishHole(); return; }
-    G.cur = i; G.busy = false; routeIdx = 0;
-    const p = G.players[i];
-    G.aim = headingTo(p.pos, G.course.pin);
-    World.setBalls(G.players.filter((q, k) => k !== i && !q.done && dist(q.pos, p.pos) > 0.4).map(q => ({ x: q.pos.x, z: q.pos.z, color: q.color })));
-    World.setAim(p.pos, G.aim, limitM());
-    const lie = lieOf(p.pos);
-    $('hTurn').textContent = `${G.players.length > 1 ? p.name + ' ' : ''}${p.strokes + 1}打目  残り`;
-    $('hSub').textContent = `${fy(dist(p.pos, G.course.pin))} yd`;
-    $('hLie').textContent = lie === '絨毯' ? 'ラフ:絨毯から打つ' : 'マットから打つ'; $('hLie').className = 's' + (lie === '絨毯' ? ' rough' : '');
-    if (lie === '絨毯') banner('ラフ', '絨毯の上から打ってください', 3000);
-    else if (G.players.length > 1) banner(`${p.name} の番`, `${lie}から打ってください`, 2200);
-    renderCourse(); sendInfo();
-  }
-  function aimStep(deg) { if (!G || G.mode !== 'course' || G.busy) return; G.aim += deg * Math.PI / 180; World.setAim(G.players[G.cur].pos, G.aim, limitM()); }
-  $('aimL').onclick = () => aimStep(-2);
-  $('aimR').onclick = () => aimStep(2);
-  $('aimPin').onclick = () => { if (!G || G.mode !== 'course' || G.busy) return; const p = G.players[G.cur]; G.aim = headingTo(p.pos, G.course.pin); World.setAim(p.pos, G.aim, limitM()); };
-  $('aimRoute').onclick = () => {
-    if (!G || G.mode !== 'course' || G.busy) return;
-    const p = G.players[G.cur], pin = G.course.pin, dp = dist(p.pos, pin);
-    const cands = G.course.route.filter(rp => dist(rp, pin) < dp - 3 && dist(p.pos, rp) > 4);
-    if (!cands.length) { G.aim = headingTo(p.pos, pin); }
-    else { const r = cands[routeIdx % cands.length]; routeIdx++; G.aim = headingTo(p.pos, r); }
-    World.setAim(p.pos, G.aim, limitM());
-  };
-  function afterCourse(p, res) {
-    const par = G.course.par; let msg = '', sub = '', kind = '', tone = '';
-    if (res.hazard) { p.strokes += 2; msg = res.hazard === 'water' ? '池ポチャ' : '崖から落下'; sub = '1打罰、元の場所から打ち直し'; kind = 'ペナルティ'; tone = 'bad'; }
-    else if (res.total >= limitM() - 1e-6) { p.strokes += 2; msg = '上限オーバー'; sub = `総距離 ${fy(res.total)}ヤード、1打罰で打ち直し`; kind = '上限オーバー'; tone = 'bad'; }
-    else {
-      p.strokes += 1; p.pos = { x: res.end.x, z: res.end.z };
-      if (res.holed) { p.done = true; p.score = p.strokes; msg = 'カップイン!'; kind = 'カップイン'; tone = 'good'; }
-      else if (res.toPin <= 2) { p.done = true; p.score = p.strokes + 1; msg = 'OK!'; sub = `ピンまで ${fDist(res.toPin)}、+1打で上がり`; kind = 'OK'; tone = 'good'; }
-      else { const z = SIM.zoneAt(G.course, p.pos.x, p.pos.z); msg = `残り ${fy(res.toPin)}ヤード`; const island = G.course.shapes.some(s => s.island && SIM.inShape(s, p.pos.x, p.pos.z)); sub = island ? 'ナイス!浮島にオン' : z === 'rough' ? 'ラフ:次は絨毯から' : z === 'green' ? 'グリーン' : z === 'fringe' ? 'カラー' : 'フェアウェイ'; kind = island ? '浮島' : z === 'rough' ? 'ラフ' : z === 'green' ? 'グリーン' : 'フェアウェイ'; if (island) tone = 'good'; }
-    }
-    if (!p.done && p.strokes >= 2 * par) { p.done = true; p.gaveUp = true; p.score = 2 * par; msg = 'ギブアップ'; sub = `ダブルパー(${2 * par}打)で打ち切り`; tone = 'bad'; }
-    if (p.done && p.score > 2 * par) p.score = 2 * par;
-    p.log.push({ n: p.strokes, total: res.total, kind });
-    banner(msg, sub, 2600, tone);
-    if (tone === 'good') Sound.good(); else if (tone === 'bad') Sound.bad();
-    if (!res.hazard && res.total < limitM()) World.addMarker(res.end.x, res.end.z, p.color);
-    renderCourse();
-    setTimeout(() => { if (G && G.mode === 'course') beginTurn(); }, 2700);
-  }
-  const SCORE_NAME = { '-3': 'アルバトロス', '-2': 'イーグル', '-1': 'バーディー', '0': 'パー', '1': 'ボギー', '2': 'ダブルボギー' };
-  const scoreName = (s, par) => { const d = s - par; return SCORE_NAME[String(d)] || (d < -3 ? `${d}` : `+${d}`); };
-  function renderCourse() {
-    const par = G.course.par, wrap = $('scPlayers'); wrap.textContent = '';
-    $('scTitle').textContent = `スコア(パー${par})`;
-    G.players.forEach((p, i) => {
-      const c = el('div', `pcard ${p.cls}` + (i === G.cur && !p.done ? ' turn' : ''));
-      c.append(el('i'), el('b', null, p.name), el('span', 'sc', p.done ? String(p.score) : String(p.strokes)));
-      c.append(el('span', 'st', p.done ? `${p.gaveUp ? 'ギブアップ' : '上がり'} ${scoreName(p.score, par)}` : `残り ${fy(dist(p.pos, G.course.pin))}yd、${lieOf(p.pos)}から`));
-      wrap.append(c);
-    });
-    const t = $('courseLog'); t.textContent = '';
-    const hr = el('tr'); ['', '打数', '総距離', '結果'].forEach((h, i) => hr.append(el('th', i ? 'n' : null, h))); t.append(hr);
-    const rows = []; G.players.forEach(p => p.log.forEach(l => rows.push({ p, l })));
-    if (!rows.length) { const r = el('tr'); const c = el('td', 'empty', '狙いを決めて、画面に「打ってOK」が出たら打ちましょう。'); c.colSpan = 4; r.append(c); t.append(r); }
-    rows.reverse().forEach(({ p, l }) => { const r = el('tr'); r.append(el('td', null, p.name), el('td', 'n', String(l.n)), el('td', 'n', fy(l.total) + 'yd'), el('td', 'n' + (l.kind === 'ペナルティ' || l.kind === '上限オーバー' ? ' bad' : ['OK', 'カップイン', '浮島'].includes(l.kind) ? ' good' : ''), l.kind)); t.append(r); });
-  }
-  function finishHole() {
-    G.busy = true; World.hideAim(); World.setBalls([]);
-    const par = G.course.par, ps = G.players;
-    const tb = $('resTable'); tb.textContent = '';
-    const best = Math.min(...ps.map(p => p.score));
-    const hr = el('tr'); ['プレイヤー', '打数', '結果'].forEach((h, i) => hr.append(el('th', i === 1 ? 'n' : null, h))); tb.append(hr);
-    ps.forEach(p => { const r = el('tr', ps.length > 1 && p.score === best ? 'win' : null); r.append(el('td', null, p.name), el('td', 'n', String(p.score)), el('td', null, (p.gaveUp ? 'ギブアップ ' : '') + scoreName(p.score, par))); tb.append(r); });
-    $('resKicker').textContent = `${G.course.name}  パー${par}`;
-    if (ps.length > 1) { const w = ps.filter(p => p.score === best); $('resTitle').textContent = w.length > 1 ? '引き分け' : `${w[0].name} の勝ち`; }
-    else $('resTitle').textContent = scoreName(ps[0].score, par);
-    $('resultBox').hidden = false; $('banner').hidden = true;
-    if (best <= par) Sound.good();
-    sendInfo();
-  }
-  $('resAgain').onclick = () => startCourse(lastCourseId);
-  $('resCourse').onclick = () => { G = null; buildCourses(); show('courseView'); sendInfo(); };
-  $('resHome').onclick = () => { G = null; show('homeView'); initHome(); sendInfo(); };
-  let quitArm = 0;
-  $('quitPlay').onclick = () => {
-    if (Date.now() - quitArm > 3000) { quitArm = Date.now(); $('quitPlay').textContent = 'もう一度押すとホームへ戻ります'; setTimeout(() => { $('quitPlay').textContent = 'やめてホームへ'; }, 3000); return; }
-    G = null; $('quitPlay').textContent = 'やめてホームへ'; show('homeView'); initHome(); sendInfo();
-  };
-
-  /* ---- shots & messages ---- */
   function onShot(s) {
     if (seen.has(s.id)) return; seen.add(s.id);
-    if (!G || $('playView').hidden) { toast('iPadでモードを選んでから打ってください'); return; }
-    if (G.busy || World.busy()) { toast('前の打球を表示中です'); return; }
-    G.busy = true; showShotStart(s);
-    if (G.mode === 'free') {
-      const res = simulate(s, G.course, G.course.tee, 0);
-      World.play(res, '#ffffff', () => { showShotEnd(res); afterFree(res); });
-    } else {
-      const p = G.players[G.cur];
-      const res = simulate(s, G.course, p.pos, G.aim);
-      World.play(res, p.color, () => { showShotEnd(res); afterCourse(p, res); });
-    }
+    if (busy || World.busy()) return;
+    busy = true; $('banner').hidden = true;
+    $('gDir').textContent = Math.abs(s.dir || 0) < 0.5 ? '0' : (s.dir > 0 ? '右' : '左') + Math.abs(s.dir).toFixed(1); $('gSpeed').textContent = s.speed.toFixed(1); $('gAngle').textContent = s.angle.toFixed(0);
+    ['gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '…'; }); $('gPinU').textContent = '';
+    const res = simulate(s);
+    World.play(res, '#ffffff', () => finish(res));
   }
+  function finish(res) {
+    const into = res.holed, d = res.hazard ? 9.99 : res.toPin;
+    $('gCarry').textContent = res.carry.toFixed(2); $('gTotal').textContent = res.total.toFixed(2);
+    if (into) { $('gPin').textContent = 'IN'; $('gPinU').textContent = ''; }
+    else if (d < 1) { $('gPin').textContent = String(Math.round(d * 100)); $('gPinU').textContent = 'cm'; }
+    else { $('gPin').textContent = d.toFixed(2); $('gPinU').textContent = 'm'; }
+    log.push({ d: into ? 0 : d, in: into }); if (log.length > 200) log.shift(); store.set('cupLog', log);
+    const best = log.length > 1 && !into && d <= Math.min(...log.slice(0, -1).map(l => l.d));
+    if (into) { banner('カップイン!', null, 3000, 'good'); Sound.good(); }
+    else if (d < 0.15) banner('おしい!', `カップまで ${fCm(d)}`, 2600, 'good');
+    else if (res.end.x > PIN_M) banner(`${fCm(d)} オーバー`, best ? 'ベスト更新' : null, 2400);
+    else banner(`${fCm(d)} ショート`, best ? 'ベスト更新' : null, 2400);
+    World.addMarker(res.end.x, res.end.z, into ? '#ffd24a' : '#ffffff');
+    render();
+    setTimeout(() => { World.setAim(COURSE.tee, 0, PIN_M + 0.6); busy = false; }, 1800);
+  }
+  function render() {
+    const n = log.length, ins = log.filter(l => l.in).length;
+    $('stN').textContent = n;
+    $('stIn').textContent = ins;
+    $('stAvg').textContent = n ? fCm(log.reduce((a, l) => a + l.d, 0) / n) : '–';
+    $('stBest').textContent = n ? (ins ? 'IN' : fCm(Math.min(...log.map(l => l.d)))) : '–';
+    const t = $('shotLog'); t.textContent = '';
+    const hr = el('tr'); ['', 'カップまで'].forEach((h, i) => hr.append(el('th', i ? 'n' : null, h))); t.append(hr);
+    if (!n) { const r = el('tr'); const c = el('td', 'empty', '「打ってOK」が出たら打ってみましょう。'); c.colSpan = 2; r.append(c); t.append(r); }
+    log.map((l, i) => [l, i]).slice(-30).reverse().forEach(([l, i]) => { const r = el('tr'); r.append(el('td', null, `${i + 1}球目`), el('td', 'n' + (l.in ? ' good' : ''), l.in ? 'カップイン' : fCm(l.d))); t.append(r); });
+  }
+  let resetArm = 0;
+  $('resetLog').onclick = () => {
+    if (Date.now() - resetArm > 3000) { resetArm = Date.now(); $('resetLog').textContent = 'もう一度押すと消去します'; setTimeout(() => { $('resetLog').textContent = '記録を消去'; }, 3000); return; }
+    log = []; store.set('cupLog', log); $('resetLog').textContent = '記録を消去'; World.load(COURSE); World.setAim(COURSE.tee, 0, PIN_M + 0.6); render();
+  };
+
   const num = (v, a, b) => { v = Number(v); return Number.isFinite(v) ? clamp(v, a, b) : null; };
   function onMessage(m) {
     if (m.type === 'status') { if (['wait', 'ready', 'track', 'off', 'adjust'].includes(m.state)) setReady(m.state, ['portrait', 'near', 'far'].includes(m.issue) ? m.issue : 'near'); return; }
     if (m.type === 'shot') {
-      const s = { id: String(m.id || '').slice(0, 32), speed: num(m.speed, 1, 40), angle: num(m.angle, 0, 70), dir: num(m.dir, -30, 30) ?? 0, spin: num(m.spin, 0, 12000) };
+      const s = { id: String(m.id || '').slice(0, 32), speed: num(m.speed, 0.3, 60), angle: num(m.angle, 0, 80), dir: num(m.dir, -30, 30) ?? 0, axis: num(m.axis, -35, 35) ?? 0, spin: num(m.spin, 0, 12000), club: num(m.club, 0, 60), massG: num(m.massG, 1, 30) ?? 5, diamMM: num(m.diamMM, 30, 80) ?? 42, drag: num(m.drag, 0.4, 2.5) ?? 1 };
       if (!s.id || s.speed == null || s.angle == null || s.spin == null) return;
       onShot(s);
     }
   }
-  const READY_TEXT = { off: 'カメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中…' };
-  const HOME_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中' };
+  const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中…' };
   const ADJUST_TEXT = { portrait: 'iPhoneを横向きにしてください', near: 'カメラが近すぎます。1m前後離してください', far: 'カメラが遠すぎます。少し近づけてください' };
   function setReady(s, iss) {
     const was = readyState; readyState = s;
-    const adj = s === 'adjust' ? ADJUST_TEXT[iss] || ADJUST_TEXT.near : '';
-    $('readyMark').dataset.state = s; $('readyText').textContent = adj || READY_TEXT[s] || '';
-    if (s === 'adjust') { $('world').dataset.ready = 'adjust'; $('homeReady').dataset.state = 'adjust'; $('homeReadyText').textContent = adj; $('gs2').classList.remove('done'); return; }
-    $('world').dataset.ready = s;
-    $('homeReady').dataset.state = s; $('homeReadyText').textContent = HOME_TEXT[s] || '';
-    $('gs2').classList.toggle('done', paired && s !== 'off');
-    if (s === 'ready' && was !== 'ready' && !$('playView').hidden) Sound.ready();
+    $('readyMark').dataset.state = s; $('world').dataset.ready = s;
+    $('readyText').textContent = s === 'adjust' ? (ADJUST_TEXT[iss] || ADJUST_TEXT.near) : READY_TEXT[s] || '';
+    if (s === 'ready' && was !== 'ready') Sound.ready();
   }
-  function sendInfo() {
-    let next = '', lie = '';
-    if (G && G.mode === 'course' && $('resultBox').hidden) { const p = G.players[G.cur]; if (p && !p.done) { next = G.players.length > 1 ? p.name : ''; lie = lieOf(p.pos); } }
-    else if (G && G.mode === 'free') lie = 'マット';
-    Net.send({ type: 'info', next, lie });
-  }
-  const tfmt = { tSpeed: v => v + ' m/s', tAngle: v => v + '°', tSpin: v => v + ' rpm' };
-  Object.keys(tfmt).forEach(k => { const e = $(k), o = $('o' + k); const u = () => { o.textContent = tfmt[k](+e.value); }; e.oninput = u; u(); });
-  $('testShot').onclick = () => onShot({ id: 't' + Date.now() + Math.random(), speed: +$('tSpeed').value, angle: +$('tAngle').value, dir: 0, spin: +$('tSpin').value });
-  return { initHome, onMessage, setReady, setPaired, sendInfo };
+  function sendInfo() { Net.send({ type: 'info', next: '', lie }); }
+  $('soundOn').checked = Sound.on(); $('soundOn').onchange = () => store.set('sound', $('soundOn').checked);
+
+  // 試し打ち:クラブ速度から練習ボールの打ち出しを計算する(スピンロフトは55度)
+  const testLaunch = () => {
+    const v = +$('tClub').value, S = 55 * Math.PI / 180, pb = PHYS.plasticBall({ massG: ballSet.massG, diamMM: ballSet.diamMM });
+    const u = PHYS.impactUnit(pb, S, v);
+    return { speed: u.speed * v, angle: (-3 * Math.PI / 180 + S - u.beta) * 180 / Math.PI, spin: u.w * v * 60 / (2 * Math.PI) };
+  };
+  const tUpd = () => { $('otClub').textContent = (+$('tClub').value).toFixed(1) + ' m/s'; };
+  $('tClub').oninput = tUpd; tUpd();
+  $('testShot').onclick = () => { const L = testLaunch(); onShot({ id: 't' + Date.now() + Math.random(), speed: L.speed, angle: L.angle, dir: 0, spin: L.spin, club: +$('tClub').value }); };
+  // 打つ場所(マット/ラフ)とカップまでの距離
+  function setLie(l) { lie = l; store.set('lie', l); document.querySelectorAll('#lieSel button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lie === l))); $('lieOut').textContent = l; sendInfo(); }
+  document.querySelectorAll('#lieSel button').forEach(b => { b.onclick = () => setLie(b.dataset.lie); });
+  function showPin() { $('pinOut').textContent = PIN_M.toFixed(2) + ' m'; $('oPinM').textContent = PIN_M.toFixed(2) + ' m'; $('oGreen0').textContent = GREEN0.toFixed(2) + ' m'; }
+  $('sPinM').value = PIN_M; $('sGreen0').value = GREEN0;
+  $('sPinM').oninput = () => { PIN_M = +$('sPinM').value; store.set('pinM', PIN_M); buildCourse(); showPin(); if (!busy) { World.load(COURSE); World.setAim(COURSE.tee, 0, PIN_M + 0.6); } };
+  $('sGreen0').oninput = () => { GREEN0 = +$('sGreen0').value; store.set('green0', GREEN0); buildCourse(); showPin(); if (!busy) { World.load(COURSE); World.setAim(COURSE.tee, 0, PIN_M + 0.6); } };
+  showPin(); setLie(lie);
+  return { start, initHome: start, onMessage, setReady, setPaired, sendInfo, pin: () => PIN_M };
 })();
 
 /* ---------------- boot ---------------- */

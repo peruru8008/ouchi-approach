@@ -212,11 +212,11 @@ details summary{cursor:pointer;font-weight:700;padding:2px 0}
 .viewbtns button{border-radius:0;border:0}
 .viewbtns button[aria-pressed="true"]{background:var(--board);color:#fff}
 /* リーダーボード */
-.board{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));background:linear-gradient(180deg,#1f4a30,#132f1e);color:#fff;pointer-events:none;border-top:3px solid #0d2416}
+.board{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:linear-gradient(180deg,#1f4a30,#132f1e);color:#fff;pointer-events:none;border-top:3px solid #0d2416}
 .board div{padding:8px 14px 10px;min-width:0}
 .board div + div{border-left:1px solid rgba(255,255,255,.12)}
 .board span{display:block;font-size:12px;color:#b9d2c0}
-.board b{font-family:var(--num);font-weight:700;font-size:32px;line-height:1.05;letter-spacing:.02em}
+.board b{font-family:var(--num);font-weight:700;font-size:30px;line-height:1.05;letter-spacing:.02em}
 .board em{font-style:normal;font-size:12px;color:#b9d2c0;margin-left:4px}
 .board .hi{background:rgba(214,58,42,.22)}
 .board .hi b{color:#ffd9d2}
@@ -255,3 +255,28 @@ table.log .bad{color:var(--flag)} table.log .good{color:var(--ready)}
 .logwrap{max-height:280px;overflow:auto;border-radius:6px}
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--board);color:#fff;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:700;z-index:40;max-width:90vw}
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+
+.corhelp{display:flex;flex-direction:column;gap:6px;background:var(--mist);border-radius:8px;padding:10px 12px;font-size:14px}
+.corhelp input{border:1px solid var(--rule);border-radius:6px;padding:6px 8px;font-size:18px;max-width:110px;background:var(--paper)}
+.corhelp .unit{flex:0 0 auto;align-self:center}
+.corhelp .row > input{flex:0 0 110px}
+@media (max-width:700px){.board{grid-template-columns:repeat(4,minmax(0,1fr))}.board div:nth-child(n+5){display:none}}
+table.log th{white-space:nowrap}
+table.log td.n{white-space:nowrap}
+
+/* シンプル版 */
+.board.six{grid-template-columns:repeat(6,minmax(0,1fr))}
+.connect.paired{padding-block:10px}
+.connect.paired .paired-mark{width:44px;height:44px;margin:0 auto}
+.connect.paired .paired-mark::after{left:15px;top:7px;width:11px;height:21px;border-width:0 4px 4px 0}
+.connect .codeline{display:flex;align-items:center;gap:6px;justify-content:center;flex-wrap:wrap}
+.connect.paired .codeline{display:none}
+.teesign b{font-family:var(--num);font-size:34px}
+.readout.four{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (min-width:520px){.readout.four{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.kv{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;font-size:14px;color:var(--ink2)}
+.kv b{color:var(--ink);font-family:var(--num);font-size:16px}
+.statuscard[data-state="tap"]{border-color:#ffd24a}
+.lie{display:flex;gap:6px}
+.lie button{flex:1;border:1px solid var(--rule);background:#fff;border-radius:8px;padding:8px 6px;font:inherit;font-weight:700;color:var(--ink2)}
+.lie button[aria-pressed="true"]{background:var(--ink);color:#fff;border-color:var(--ink)}
