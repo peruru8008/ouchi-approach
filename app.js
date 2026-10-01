@@ -317,6 +317,70 @@ const DTL = (() => {
     let d = 0, n = 0; for (let gy = 1; gy < 5; gy++) for (let gx = 1; gx < 5; gx++) for (let c = 0; c < 3; c++) { const i = (gy * 6 + gx) * 3 + c; d += Math.abs(a[i] * g - b[i]); n++; }
     return d / n;
   }
+  // ---- 丸の検出(ハフ変換)。背景を覚えていなくても、手持ちで少し動いても、ボールの輪郭から見つける ----
+  // R: 画像の一部、(cx,cy): 探す中心(Rの中の座標)、sr: 中心を探す半径、[rmin,rmax]: ボールの半径の範囲
+  function findCircle(R, cx, cy, sr, rmin, rmax) {
+    const { d, w, h } = R, n = w * h;
+    const gx = new Float32Array(n), gy = new Float32Array(n), mag = new Float32Array(n);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      let best = 0, bx = 0, by = 0;
+      for (let c = 0; c < 3; c++) {
+        const p = (k) => d[k * 4 + c], k = y * w + x;
+        const sx = (p(k - w + 1) + 2 * p(k + 1) + p(k + w + 1)) - (p(k - w - 1) + 2 * p(k - 1) + p(k + w - 1));
+        const sy = (p(k + w - 1) + 2 * p(k + w) + p(k + w + 1)) - (p(k - w - 1) + 2 * p(k - w) + p(k - w + 1));
+        const m = sx * sx + sy * sy; if (m > best) { best = m; bx = sx; by = sy; }
+      }
+      const k = y * w + x; mag[k] = Math.sqrt(best); gx[k] = bx; gy[k] = by;
+    }
+    const sorted = Array.from(mag).sort((a, b) => a - b), thr = Math.max(80, sorted[Math.floor(n * 0.9)]);
+    const step = Math.max(1, (rmax - rmin) / 14), radii = []; for (let r = rmin; r <= rmax + 1e-6; r += step) radii.push(r);
+    const acc = radii.map(() => new Float32Array(n));
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const k = y * w + x; if (mag[k] < thr) continue;
+      const ux = gx[k] / mag[k], uy = gy[k] / mag[k];
+      radii.forEach((r, ri) => {
+        for (const s of [1, -1]) {
+          const X = Math.round(x + s * ux * r), Y = Math.round(y + s * uy * r);
+          if (X < 0 || Y < 0 || X >= w || Y >= h) continue;
+          if ((X - cx) * (X - cx) + (Y - cy) * (Y - cy) > sr * sr) continue;
+          acc[ri][Y * w + X] += 1;
+        }
+      });
+    }
+    let best = null;
+    radii.forEach((r, ri) => {
+      const A = acc[ri];
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        const k = y * w + x; if (!A[k]) continue;
+        const v = A[k] + 0.5 * (A[k - 1] + A[k + 1] + A[k - w] + A[k + w]);       // 少しぼかして集計
+        const sc = v / (2 * Math.PI * r * 2.2);
+        if (!best || sc > best.score) best = { x, y, r, score: sc };
+      }
+    });
+    if (!best) return null;
+    // 内側と外側の色がはっきり違うこと(床や芝の模様の偶然の丸を除く)
+    const mean = (r0, r1) => { let s = [0, 0, 0], c = 0; for (let y = Math.floor(best.y - r1); y <= best.y + r1; y++) for (let x = Math.floor(best.x - r1); x <= best.x + r1; x++) { if (x < 0 || y < 0 || x >= w || y >= h) continue; const q = Math.hypot(x - best.x, y - best.y); if (q < r0 || q > r1) continue; const i = (y * w + x) * 4; s[0] += d[i]; s[1] += d[i + 1]; s[2] += d[i + 2]; c++; } return c ? s.map(v => v / c) : null; };
+    const ins = mean(0, best.r * 0.7), out = mean(best.r * 1.25, best.r * 1.6);
+    best.contrast = ins && out ? Math.abs(ins[0] - out[0]) + Math.abs(ins[1] - out[1]) + Math.abs(ins[2] - out[2]) : 0;
+    // 輪郭の上に、実際に縁がどれだけあるか
+    let on = 0, tot = 0; for (let a = 0; a < 48; a++) { const t = a / 48 * 2 * Math.PI; let hit = 0; for (const dr of [-1, 0, 1]) { const X = Math.round(best.x + Math.cos(t) * (best.r + dr)), Y = Math.round(best.y + Math.sin(t) * (best.r + dr)); if (X >= 0 && Y >= 0 && X < w && Y < h && mag[Y * w + X] >= thr * 0.7) hit = 1; } on += hit; tot++; }
+    best.support = on / tot;
+    return best;
+  }
+  // 画面全体の縮小画像で、カメラが動いた(画面全体がずれた)かを見る。人が動いても全体はずれないので区別できる
+  function gray(a) { const n = a.w * a.h, g = new Float32Array(n); let m = 0; for (let k = 0; k < n; k++) { const i = k * 4; g[k] = a.d[i] + a.d[i + 1] + a.d[i + 2]; m += g[k]; } m /= n || 1; for (let k = 0; k < n; k++) g[k] /= m || 1; return g; }
+  function shiftOf(a, b) {
+    if (!a || !b || a.w !== b.w || a.h !== b.h) return null;
+    const A = gray(a), B = gray(b), w = a.w, h = a.h; let best = null, zero = 0;
+    for (let dy = -6; dy <= 6; dy++) for (let dx = -6; dx <= 6; dx++) {
+      const ds = []; for (let y = 6; y < h - 6; y++) for (let x = 6; x < w - 6; x++) ds.push(Math.abs(A[y * w + x] - B[(y + dy) * w + x + dx]));
+      ds.sort((p, q) => p - q); const md = ds[ds.length >> 1];
+      if (dx === 0 && dy === 0) zero = md;
+      if (!best || md < best.md) best = { dx, dy, md };
+    }
+    return { dx: best.dx, dy: best.dy, md: best.md, zero };
+  }
+  const movedBy = (sh) => sh && (((sh.dx || sh.dy) && sh.md < 0.7 * sh.zero && sh.zero > 0.04) || sh.zero > 0.4);
   function solveLin(A, b) {
     const n = b.length, M = A.map((r, i) => r.concat([b[i]]));
     for (let c = 0; c < n; c++) {
@@ -331,6 +395,7 @@ const DTL = (() => {
     let state = 'setup', tee = null, empty = null, snap = null, stable = 0, prevIn = null, fN = 0;
     let ball = null, pal = null, seam0 = null, ref = null, refBox = null, readyRoi = null, launchT = 0;
     let obs = [], lost = 0, lastSeen = null, exp = null, quiet = 0, removeSeen = false, armT = 0, back = 0;
+    let cand = null, scene = null, movedN = 0, calmN = 0, prevState = 'wait', clearT = null, lastSmall = null;
     const S = () => opt();
     const roiBox = () => { const R = Math.max(10, Math.ceil(tee.r * 3)); return [Math.round(tee.x - R), Math.round(tee.y - R), 2 * R, 2 * R]; };
 
@@ -339,11 +404,11 @@ const DTL = (() => {
       const R = Math.round(Math.min(fr.W, fr.H) * 0.06);
       tee = { x, y, r: 0, R };
       snap = fr.roi(Math.round(x - R), Math.round(y - R), 2 * R, 2 * R);
-      state = 'remove'; quiet = 0; removeSeen = false; empty = null;
+      state = 'remove'; quiet = 0; removeSeen = false; empty = null; ball = null; scene = fr.small ? fr.small() : null; movedN = 0;
       return { ev: 'remove' };
     }
     let thumb = null;
-    function useStored(t) { tee = { x: t.x, y: t.y, r: t.r }; thumb = t.thumb || null; state = 'clear'; quiet = 0; empty = null; }
+    function useStored(t) { tee = { x: t.x, y: t.y, r: t.r }; thumb = t.thumb || null; state = 'clear'; quiet = 0; empty = null; clearT = null; scene = null; }
     function measureFromSnap(cur) {
       const thr = 60 / S().sens, m = closeOpen(diffMask(cur, snap, thr), snap.w, snap.h);
       const cx = tee.x - snap.x, cy = tee.y - snap.y;
@@ -438,7 +503,27 @@ const DTL = (() => {
         if (trackStep(fr, t)) { state = 'after'; quiet = 0; return { ev: 'result', res: solve(fr) }; }
         return null;
       }
+      // カメラが動いていないか(6コマごと)
+      if (fr.small && fN % 6 === 0) {
+        const sm = fr.small();
+        if (scene) {
+          const toRef = shiftOf(sm, scene), toPrev = shiftOf(sm, lastSmall);
+          if (state !== 'moved') {
+            if (movedBy(toRef) && state !== 'armed') movedN++; else movedN = 0;
+            if (movedN >= 2) { prevState = state === 'ready' ? 'wait' : state; state = 'moved'; calmN = 0; lastSmall = sm; return { ev: 'moved' }; }
+          } else {
+            if (toRef && !toRef.dx && !toRef.dy && toRef.zero < 0.05) { state = prevState === 'remove' ? 'remove' : 'wait'; stable = 0; prevIn = null; lastSmall = sm; return { ev: 'back', state }; }
+            calmN = toPrev && !movedBy(toPrev) && toPrev.zero < 0.05 ? calmN + 1 : 0;
+            // 動いたあと別の向きで止まった:置き場所の登録からやり直す
+            if (calmN >= 15) { state = 'setup'; tee = null; empty = null; ball = null; scene = null; lastSmall = sm; return { ev: 'retap' }; }
+          }
+        } else if (state === 'wait' || state === 'ready') scene = sm;
+        lastSmall = sm;
+      }
+      if (state === 'moved') return null;
       const ts = teeState(fr);
+      if (state === 'clear' && clearT == null) clearT = t;
+      if (state === 'clear' && t - clearT > 4) { state = 'setup'; tee = null; return { ev: 'retap' }; }   // 前に覚えた置き場所と違う
       if (state === 'remove' || state === 'clear' || state === 'after') {
         // 置き場所が空になって落ち着くのを待つ → 背景として覚える
         if (state === 'remove') {
@@ -454,7 +539,7 @@ const DTL = (() => {
             const mb = measureFromSnap(cur);
             if (!mb || mb.r < 3 || mb.r > Math.min(fr.W, fr.H) * 0.06) { quiet = 0; return null; }   // クラブが重なっているだけ等。待ち続ける
             tee = { x: mb.x, y: mb.y, r: mb.r };
-            const [x2, y2, w2, h2] = roiBox(); empty = fr.roi(x2, y2, w2, h2); thumb = thumbOf(empty); prevIn = null; state = 'wait'; stable = 0;
+            const [x2, y2, w2, h2] = roiBox(); empty = fr.roi(x2, y2, w2, h2); thumb = thumbOf(empty); prevIn = null; state = 'wait'; stable = 0; if (fr.small) scene = fr.small();
             return { ev: 'teeset', tee: Object.assign({ thumb }, tee) };
           }
           return null;
@@ -469,12 +554,13 @@ const DTL = (() => {
         if (quiet >= 18) {
           // 'clear':アプリ再開時。保存した空の置き場所の縮小画像と同じに見えるときだけ、背景として使う
           if (state === 'clear' && thumb && thumbDiff(thumbOf(ts.cur), thumb) > 28) { quiet = 0; return { ev: 'notempty' }; }
-          empty = ts.cur; thumb = thumbOf(empty); state = 'wait'; stable = 0;
+          empty = ts.cur; thumb = thumbOf(empty); state = 'wait'; stable = 0; if (fr.small) scene = fr.small();
           return { ev: 'empty', thumb };
         }
         return null;
       }
       if (state === 'wait') {
+        cand = ts.present ? ts.b : null;
         if (ts.present && ts.still) stable++; else stable = 0;
         if (stable >= READY_FRAMES) {
           const b = ts.b; ball = { x: b.x, y: b.y, r: b.r };
@@ -658,10 +744,11 @@ const DTL = (() => {
       feed, tap, useStored,
       reset() { state = tee ? 'clear' : 'setup'; quiet = 0; },
       get state() { return state; }, get tee() { return tee; }, get ball() { return ball; }, get obs() { return obs; },
+      get cand() { return state === 'wait' ? cand : null; }, get progress() { return state === 'wait' ? Math.min(1, stable / READY_FRAMES) : state === 'ready' || state === 'armed' ? 1 : 0; },
       get emptyReady() { return !!empty; }, get thumb() { return thumb; }
     };
   }
-  return { session };
+  return { session, findCircle };
 })();
 
 
@@ -820,6 +907,7 @@ const Cam = (() => {
   const vid = $('vid'), ov = $('overlay'), octx = ov.getContext('2d');
   const scratch = document.createElement('canvas'); const sctx = scratch.getContext('2d', { willReadFrequently: true });
   let VW = 0, VH = 0, stream = null, wake = null, running = false, sess = null;
+  let facing = store.get('facing', 'environment') === 'user' ? 'user' : 'environment';
   let state = 'off', lastSent = '', info = { next: '', lie: '' }, issue = null, cooldownUntil = 0, lastRes = null;
   let lastTouch = Date.now(), lastActive = Date.now(), dark = false;
   const ftimes = [];
@@ -841,7 +929,8 @@ const Cam = (() => {
     let [x, y, z] = gAvg.map(q => q / n);
     const ang = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) * Math.PI / 180;
     const xs = x * Math.cos(ang) + y * Math.sin(ang), ys = -x * Math.sin(ang) + y * Math.cos(ang);
-    let u = [xs, -ys, -z];
+    // 外カメラは画面の裏側を、インカメラは画面の表側を見る
+    let u = facing === 'user' ? [-xs, -ys, z] : [xs, -ys, -z];
     if (u[1] > 0) u = u.map(q => -q);                    // 端末によって符号が逆。カメラは立てて使うので「上」は画面の上側
     return u;
   }
@@ -887,9 +976,10 @@ const Cam = (() => {
   const TEXT = {
     off: ['カメラを開始してください', 'ボールの真後ろ1.8m・床に近い低い位置に、iPhoneを縦向きで置きます'],
     setup: ['ボールをタップ', 'ボールを置き場所に置いて、映像の中のボールを1回タップしてください'],
-    remove: ['ボールをどけてください', '置き場所を覚えます。ボールを手でどけるか、そのまま1球打ってください'],
+    remove: ['ボールをどけてください', '何もない置き場所を覚えます。ボールを手でどけて、少し待ってください(そのまま1球打ってもOK)'],
+    moved: ['カメラが動いています', '三脚などに固定してください。止まると再開します'],
     clear: ['置き場所を確認中', 'ボールがない状態で少し待ってください'],
-    wait: ['ボールを置いてください', '置き場所にボールを置くと、自動で見つけます'],
+    wait: ['ボールを置いてください', '黄色の丸の所に置くと自動で見つけます。丸の位置が違うときは、映像のボールをタップ'],
     ready: ['打ってOK', ''],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
@@ -904,7 +994,7 @@ const Cam = (() => {
   function setState(s, sub) {
     state = s;
     const t = s === 'adjust' ? ISSUE[issue] : (TEXT[s] || ['', '']);
-    $('camStatus').dataset.state = s === 'adjust' ? 'error' : s === 'setup' || s === 'remove' || s === 'clear' ? 'tap' : s;
+    $('camStatus').dataset.state = s === 'adjust' || s === 'moved' ? 'error' : s === 'setup' || s === 'remove' || s === 'clear' ? 'tap' : s;
     $('stateText').textContent = t[0];
     $('stateSub').textContent = sub || (s === 'ready' && infoLine()) || t[1];
     $('boText').textContent = t[0];
@@ -936,8 +1026,11 @@ const Cam = (() => {
     sctx.drawImage(vid, x0, y0, ww, hh, 0, 0, ww, hh);
     return { d: sctx.getImageData(0, 0, ww, hh).data, x: x0, y: y0, w: ww, h: hh };
   }
-  const frameObj = { get W() { return VW; }, get H() { return VH; }, roi };
-  const teeKey = () => `tee_${VW}x${VH}`;
+  // 画面全体の縮小画像(カメラが動いたかの確認用。24×40マス)
+  const tiny = document.createElement('canvas'); const tctx = tiny.getContext('2d', { willReadFrequently: true });
+  function small() { const w = VW > VH ? 40 : 24, h = VW > VH ? 24 : 40; tiny.width = w; tiny.height = h; tctx.drawImage(vid, 0, 0, w, h); return { d: tctx.getImageData(0, 0, w, h).data, w, h }; }
+  const frameObj = { get W() { return VW; }, get H() { return VH; }, roi, small };
+  const teeKey = () => `tee_${facing}_${VW}x${VH}`;
   function newSession() {
     sess = DTL.session(() => ({ dist: S.dist, diamMM: S.diam, massG: S.mass, cor: S.cor, attack: S.attack, drag: S.drag, sens: S.sens, up: upCam(), maxObs: 100, maxT: 1.6 }));
     const t = store.get(teeKey(), null);
@@ -949,7 +1042,7 @@ const Cam = (() => {
     // 「カメラを開始」を押したときに、まず傾きセンサーの許可を聞き、そのあとカメラの許可を聞く(2つの確認が重ならないように)
     const motionOK0 = await askMotion();
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } } });
     } catch (e) { setState('error', 'カメラの使用が許可されませんでした。設定 → Safari → カメラ を確認してください'); return; }
     vid.srcObject = stream;
     try { await vid.play(); } catch (e) {}
@@ -972,6 +1065,10 @@ const Cam = (() => {
     setState('off', msg);
   }
   $('camStart').onclick = start;
+  // 外カメラ/インカメラの切り替え
+  const showFacing = () => { $('camFlip').textContent = facing === 'user' ? '外カメラに切り替え' : 'インカメラに切り替え'; };
+  $('camFlip').onclick = async () => { facing = facing === 'user' ? 'environment' : 'user'; store.set('facing', facing); showFacing(); if (running) { stop(); await start(); } };
+  showFacing();
   $('camStop').onclick = () => stop();
   $('reTee').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } store.set(teeKey(), null); newSession(); setDark(false); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
   document.addEventListener('visibilitychange', () => { if (document.hidden && running) stop('画面を離れたのでカメラを止めました。「カメラを開始」で再開します'); });
@@ -984,7 +1081,7 @@ const Cam = (() => {
     if (!running || role !== 'camera') return;
     const now = Date.now(); showTilt();
     if (now - lastActive > IDLE_STOP) { stop('10分間打たなかったので、カメラを休止しました。「カメラを開始」で再開します'); return; }
-    if (!dark && state !== 'setup' && state !== 'adjust' && now - lastTouch > IDLE_DARK) setDark(true);
+    if (!dark && state !== 'setup' && state !== 'remove' && state !== 'moved' && state !== 'adjust' && now - lastTouch > IDLE_DARK) setDark(true);
     if (state === 'ready' || state === 'adjust') pushStatus(true);
   }, 1000);
 
@@ -995,7 +1092,8 @@ const Cam = (() => {
     const w = H * va; return { x: (W - w) / 2, y: 0, w, h: H };
   }
   ov.addEventListener('click', (e) => {
-    if (!running || !sess || sess.state !== 'setup' || !VW) return;
+    // 映像のボールをタップすると、いつでも置き場所を登録し直せる(計測中を除く)
+    if (!running || !sess || !VW || sess.state === 'track' || sess.state === 'armed') return;
     drawOverlay();                                       // 重ね絵の大きさを画面に合わせてから位置を計算する
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
@@ -1029,22 +1127,40 @@ const Cam = (() => {
     const r = ov.getBoundingClientRect(); const W = Math.round(r.width * devicePixelRatio), H = Math.round(r.height * devicePixelRatio);
     if (ov.width !== W || ov.height !== H) { ov.width = W; ov.height = H; }
     octx.clearRect(0, 0, W, H);
+    if (!sess) return;
     const b = videoBox(), sx = b.w / VW, sy = b.h / VH, dpr = devicePixelRatio;
-    const t = sess && (sess.ball || sess.tee);
-    if (t && t.r) {
-      octx.strokeStyle = state === 'ready' ? '#1f9d55' : state === 'adjust' ? '#d63a2a' : '#ffd24a'; octx.lineWidth = 3 * dpr;
-      octx.beginPath(); octx.arc(b.x + t.x * sx, b.y + t.y * sy, t.r * sx + 6 * dpr, 0, Math.PI * 2); octx.stroke();
+    const X = (x) => b.x + x * sx, Y = (y) => b.y + y * sy;
+    const ring = (x, y, rad, color, width, dash) => { octx.save(); octx.strokeStyle = color; octx.lineWidth = width * dpr; octx.setLineDash(dash ? dash.map(v => v * dpr) : []); octx.beginPath(); octx.arc(X(x), Y(y), rad, 0, Math.PI * 2); octx.stroke(); octx.restore(); };
+    const ss = sess.state, pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+    const tee = sess.tee, ball = sess.ball, cand = sess.cand;
+    if (ss === 'track' || (performance.now() < cooldownUntil + 1500 && lastRes)) {
+      // 追跡中:追えた点と、いまのボールの丸
+      const tr = ss === 'track' ? sess.obs : lastRes.obs;
+      octx.fillStyle = '#d63a2a'; tr.forEach(q => { octx.beginPath(); octx.arc(X(q.u), Y(q.v), 3 * dpr, 0, Math.PI * 2); octx.fill(); });
+      const L = tr[tr.length - 1]; if (L && ss === 'track') ring(L.u, L.v, L.d / 2 * sx + 4 * dpr, '#d63a2a', 3);
+    } else if (cand && (ss === 'wait')) {
+      // ボールを見つけた:黄色の丸と、「打ってOK」までの進み具合(緑の弧)
+      const rad = cand.r * sx + 6 * dpr;
+      ring(cand.x, cand.y, rad, '#ffd24a', 3);
+      const pr = sess.progress; octx.save(); octx.strokeStyle = '#1f9d55'; octx.lineWidth = 5 * dpr; octx.beginPath(); octx.arc(X(cand.x), Y(cand.y), rad + 5 * dpr, -Math.PI / 2, -Math.PI / 2 + pr * Math.PI * 2); octx.stroke(); octx.restore();
+    } else if (ball && (ss === 'ready' || ss === 'armed')) {
+      // 打ってOK:緑の丸が脈打つ。構えでボールが隠れている間はオレンジ
+      const rad = ball.r * sx + (6 + 3 * pulse) * dpr;
+      ring(ball.x, ball.y, rad, ss === 'armed' ? '#f0a020' : '#1f9d55', ss === 'armed' ? 3 : 4 + 2 * pulse);
+    } else if (tee && tee.r && (ss === 'wait' || ss === 'clear' || ss === 'after' || ss === 'moved')) {
+      // ボール待ち:置き場所を点線の丸で示す
+      ring(tee.x, tee.y, tee.r * sx + 6 * dpr, ss === 'moved' ? '#d63a2a' : 'rgba(255,255,255,.85)', 2.5, [6, 5]);
+    } else if (tee && ss === 'remove') {
+      ring(tee.x, tee.y, (8 + 6 * pulse) * dpr, '#ffd24a', 3);
     }
-    const tr = state === 'track' ? sess.obs : (performance.now() < cooldownUntil + 1500 && lastRes ? lastRes.obs : null);
-    if (tr) { octx.fillStyle = '#d63a2a'; tr.forEach(q => { octx.beginPath(); octx.arc(b.x + q.u * sx, b.y + q.v * sy, 3 * dpr, 0, Math.PI * 2); octx.fill(); }); }
-    if (sess && sess.state === 'setup') {
+    if (ss === 'setup') {
       octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(0, H - 44 * dpr, W, 44 * dpr);
       octx.fillStyle = '#fff'; octx.font = `${15 * dpr}px sans-serif`; octx.textAlign = 'center';
-      octx.fillText('置いたボールをタップしてください', W / 2, H - 16 * dpr);
+      octx.fillText('置き場所に置いたボールをタップしてください', W / 2, H - 16 * dpr);
     }
   }
 
-  const EVS = { remove: 'remove', teeset: 'wait', empty: 'wait', notempty: 'clear', tapfail: 'setup', track: 'track', lostball: 'wait' };
+  const EVS = { remove: 'remove', teeset: 'wait', empty: 'wait', notempty: 'clear', tapfail: 'setup', track: 'track', lostball: 'wait', moved: 'moved', retap: 'setup' };
   function frame(t) {
     ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
     if (vid.videoWidth !== VW || vid.videoHeight !== VH) { VW = vid.videoWidth; VH = vid.videoHeight; newSession(); }
@@ -1058,6 +1174,8 @@ const Cam = (() => {
         issue = VW > VH ? 'landscape' : ev.issue || null;
         if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
       } else if (ev.ev === 'result') onResult(ev.res);
+      else if (ev.ev === 'back') setState(ev.state === 'remove' ? 'remove' : 'wait');
+      else if (ev.ev === 'retap') { store.set(teeKey(), null); setState('setup', 'カメラの向きが変わったので、置き場所を登録し直します。映像のボールをタップしてください'); }
       else if (EVS[ev.ev] && state !== EVS[ev.ev]) setState(EVS[ev.ev]);
     } else if (sess.state === 'ready' && state !== 'ready' && state !== 'adjust') setState('ready');
     else if (sess.state === 'wait' && state === 'ready') setState('wait');
