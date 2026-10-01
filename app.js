@@ -395,7 +395,7 @@ const DTL = (() => {
     let state = 'setup', tee = null, empty = null, snap = null, stable = 0, prevIn = null, fN = 0;
     let ball = null, pal = null, seam0 = null, ref = null, refBox = null, readyRoi = null, launchT = 0;
     let obs = [], lost = 0, lastSeen = null, exp = null, quiet = 0, removeSeen = false, armT = 0, back = 0;
-    let cand = null, scene = null, movedN = 0, calmN = 0, prevState = 'wait', clearT = null, lastSmall = null;
+    let early = false, cand = null, scene = null, movedN = 0, calmN = 0, prevState = 'wait', clearT = null, lastSmall = null;
     const S = () => opt();
     const roiBox = () => { const R = Math.max(10, Math.ceil(tee.r * 3)); return [Math.round(tee.x - R), Math.round(tee.y - R), 2 * R, 2 * R]; };
 
@@ -524,7 +524,7 @@ const DTL = (() => {
       if (!obs.length) { px = ball.x; py = ball.y - 5 * r0; rad = 9 * r0; }
       else {
         const L = obs[obs.length - 1], Q = obs.length >= 2 ? obs[obs.length - 2] : null;
-        const vx = Q ? (L.u - Q.u) / (L.t - Q.t) : 0, vy = Q ? (L.v - Q.v) / (L.t - Q.t) : -r0 * 60 * 0.7;
+        const dq = Q ? Math.max(1 / 240, L.t - Q.t) : 1, vx = Q ? (L.u - Q.u) / dq : 0, vy = Q ? (L.v - Q.v) / dq : -r0 * 60 * 0.7;
         const dt = t - L.t; px = L.u + vx * dt; py = L.v + vy * dt; rad = Math.max(3.5 * L.d, 1.3 * Math.hypot(vx, vy) * dt);
       }
       // 背景を覚えている範囲の中に切り詰める
@@ -581,7 +581,11 @@ const DTL = (() => {
       if (state === 'setup') return null;
       if (state === 'track') {
         if (obs.length && t - obs[obs.length - 1].t < 0.002) return null;
-        if (trackStep(fr, t)) { state = 'after'; quiet = 0; return { ev: 'result', res: solve(fr) }; }
+        const done = trackStep(fr, t);
+        // 14コマ(約0.25秒)追えたら、すぐ結果を出す。そのあとも追い続けて、終わったら空気抵抗の合わせ込みに使う
+        if (!early && obs.length >= 14 && !done) { early = true; const r = solve(fr, true); if (r.ok) return { ev: 'result', res: r }; early = 'failed'; }
+        if (done) { state = 'after'; quiet = 0; const r = solve(fr); const e0 = early; early = false; return e0 === true ? { ev: 'calib', res: r } : { ev: 'result', res: r }; }
+        return null;
         return null;
       }
       // カメラが動いていないか(6コマごと)
@@ -656,9 +660,11 @@ const DTL = (() => {
         // クラブが前に来てボールが隠れている(構え)か、打ったあと。飛んでいくボールが見つかれば追跡、ボールがまた見えれば元に戻る
         if (teeChanged(ts.cur) < 0.15) { if (++back >= 3) { state = 'ready'; back = 0; } return null; }
         back = 0;
+        if (obs.length && t - obs[obs.length - 1].t < 0.002) return null;     // 同じコマが重複して届いた
         trackStep(fr, t);
         if (obs.length && lost >= 2) { obs = []; lost = 0; }                   // 続かなかった:クラブなど
         if (obs.length >= 3) {
+          early = false;
           // 3点とも上へ進み、大きさがそろっていればボール
           const [a0, a1, a2] = obs, up1 = a0.v - a1.v, up2 = a1.v - a2.v, ds = Math.max(a0.d, a1.d, a2.d) / Math.min(a0.d, a1.d, a2.d);
           if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 1.4) { state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
@@ -689,7 +695,7 @@ const DTL = (() => {
     }
 
     // ---- 軌道の当てはめ ----
-    function solve(fr) {
+    function solve(fr, quick) {
       const o = S(), D = (o.diamMM || 42) / 1000, Z0 = o.dist || 1.93;
       const res = { n: obs.length, obs: obs.slice() };
       // ボールが戻ってきた(打っていない)・追えなかった
@@ -802,7 +808,7 @@ const DTL = (() => {
       let cut = obs.length, top = 0;
       for (let i = 1; i < obs.length; i++) { if (obs[i].v < obs[top].v) top = i; if (i > top + 2 && obs[i].v < obs[i - 1].v - 0.5 && obs[i - 1].v >= obs[i - 2].v) { cut = i - 1; break; } }
       res.bounce = cut < obs.length ? cut : -1;
-      if (cut >= 16 && obs[cut - 1].t - obs[0].t > 0.28) {
+      if (!quick && cut >= 16 && obs[cut - 1].t - obs[0].t > 0.28) {
         // 着地までの長い軌道で、打ち出しと空気抵抗をいっしょに当てはめ直す(点が多いぶん、速さが安定する)
         const all = obs.slice(0, Math.min(cut, 90)).map((q, i) => Object.assign({}, q, i < use.length ? { w: use[i].w, wd: use[i].wd } : {}));
         all.forEach(q => { if (q.d > 2.1 * ball.r) q.wd = 0; });
@@ -1104,6 +1110,7 @@ const Cam = (() => {
   // ---- 映像の一部を元の解像度で読む ----
   function roi(x, y, w, h) {
     x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) { x = 0; y = 0; w = 1; h = 1; }   // 計算が乱れたときも止まらない
     const x0 = clamp(x, 0, VW - 1), y0 = clamp(y, 0, VH - 1), x1 = clamp(x + w, 1, VW), y1 = clamp(y + h, 1, VH);
     const ww = Math.max(1, x1 - x0), hh = Math.max(1, y1 - y0);
     if (scratch.width < ww) scratch.width = ww; if (scratch.height < hh) scratch.height = hh;
@@ -1209,8 +1216,6 @@ const Cam = (() => {
   function onResult(res) {
     lastRes = res; lastActive = Date.now();
     if (!res.ok) { setState('error', `${WHY[res.why] || '計測できませんでした'}。部屋を明るくし、ボールの上側の背景がボールと違う色になるようにしてください`); cooldownUntil = performance.now() + 2000; return; }
-    // 長く追えたときは、そのボールの空気抵抗の倍率を少しずつ合わせる
-    if (res.dragFit && res.dragRms < 1.3 * res.rms + 0.5) { S.drag = +clamp(S.drag * 0.7 + res.dragFit * 0.3, 0.3, 2.5).toFixed(3); store.set('drag', S.drag); showDrag(); }
     const cv = PHYS.plasticLaunch(res.speed, res.angle, { massG: S.mass, diamMM: S.diam, cor: S.cor, attack: S.attack });
     const speed = clamp(res.speed, 0.5, 40), angle = clamp(res.angle, 0, 80), spin = clamp(Math.round(cv.spin / 10) * 10, 0, 12000);
     const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: +clamp(res.dir, -30, 30).toFixed(1), axis: +clamp(res.axis || 0, -35, 35).toFixed(1), spin,
@@ -1267,7 +1272,7 @@ const Cam = (() => {
   function frame(t) {
     ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
     if (vid.videoWidth !== VW || vid.videoHeight !== VH) { VW = vid.videoWidth; VH = vid.videoHeight; newSession(); }
-    if (performance.now() < cooldownUntil) { if (!dark) drawOverlay(); return; }
+    if (performance.now() < cooldownUntil && sess.state !== 'track') { if (!dark) drawOverlay(); return; }
     if (state === 'done' || state === 'error') setState(sess.state === 'ready' ? 'ready' : 'wait');
     const ev = sess.feed(frameObj, t);
     if (ev) {
@@ -1278,6 +1283,7 @@ const Cam = (() => {
         issue = VW > VH ? 'landscape' : ev.issue || null;
         if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
       } else if (ev.ev === 'result') onResult(ev.res);
+      else if (ev.ev === 'calib') { const r = ev.res; if (r.dragFit && r.dragRms < 1.3 * r.rms + 0.5) { S.drag = +clamp(S.drag * 0.7 + r.dragFit * 0.3, 0.3, 2.5).toFixed(3); store.set('drag', S.drag); showDrag(); } lastRes = r; }
       else if (ev.ev === 'back') setState(ev.state === 'remove' ? 'remove' : 'wait');
       else if (ev.ev === 'retap') { store.set(teeKey(), null); setState('setup', 'カメラの向きが変わったので、置き場所を登録し直します。映像のボールをタップしてください'); }
       else if (EVS[ev.ev] && state !== EVS[ev.ev]) setState(EVS[ev.ev]);
