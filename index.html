@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>おうちアプローチ</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css?v=15a1">
+<link rel="stylesheet" href="style.css?v=15a2">
 </head>
 <body>
 
@@ -62,8 +62,9 @@
     <button class="btn" id="camStop" hidden>カメラを止める</button>
     <button class="btn" id="camFlip">インカメラに切り替え</button>
   </div>
-  <p class="note">カメラを開始するたびに、置いたボールを映像の上でタップして置き場所を登録します。カメラの傾きは「カメラを開始」のときに許可を求められる傾きセンサーで測ります。しばらく触らないと画面を暗くします(タップで戻ります)。<span class="ver">版 v15α1・検証用</span></p>
+  <p class="note">カメラを開始するたびに、置いたボールを映像の上でタップして置き場所を登録します。カメラの傾きは「カメラを開始」のときに許可を求められる傾きセンサーで測ります。2球目以降は同じ場所に置けば自動で認識します。画面の自動暗転・無操作による停止はしません。<span class="ver">版 v15α2・検証用</span></p>
 
+  <p class="note" id="liveDiagnostic" aria-live="polite">映像処理：カメラ開始待ち</p>
   <section class="card" id="camResult" hidden>
     <div class="readout four">
       <div><span>球速（推定）</span><b id="cSpeed">–</b></div>
@@ -102,11 +103,6 @@
     </div>
   </details>
 </main>
-<div class="blackout" id="blackout" hidden>
-  <b id="boText">打ってOK</b>
-  <span>省電力中です。タップで戻ります</span>
-</div>
-
 <!-- ============ iPad: 1画面だけ ============ -->
 <main id="playView" hidden>
   <section class="minw0">
@@ -166,9 +162,9 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="vendor/three.min.js?v=15a1"></script>
-<script src="vendor/peerjs.min.js?v=15a1"></script>
-<script src="vendor/qrcode.js?v=15a1"></script>
-<script src="app.js?v=15a1"></script>
+<script src="vendor/three.min.js?v=15a2"></script>
+<script src="vendor/peerjs.min.js?v=15a2"></script>
+<script src="vendor/qrcode.js?v=15a2"></script>
+<script src="app.js?v=15a2"></script>
 </body>
 </html>

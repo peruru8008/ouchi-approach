@@ -690,7 +690,11 @@ const DTL = (() => {
           if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 2.5 && consistent && receding && directionCos>.8) { state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
           obs = []; lost = 0; exp = 2 * ball.r;
         }
-        if (t - armT > 12) { state = 'wait'; stable = 0; return { ev: 'lostball' }; }
+        // The first missed shot may have no empty-floor reference yet. Going
+        // straight to wait makes teeState.present permanently false. Recover
+        // through after, which captures the empty floor or recognises the
+        // returned ball, without another tap.
+        if (t - armT > 12) { state = 'after'; stable = 0; quiet = 0; obs = []; lost = 0; exp = 2 * ball.r; return { ev: 'lostball' }; }
         return null;
       }
       if (state === 'ready') {
@@ -1049,13 +1053,11 @@ const Cam = (() => {
   let VW = 0, VH = 0, stream = null, wake = null, running = false, sess = null;
   let facing = store.get('facing', 'environment') === 'user' ? 'user' : 'environment';
   let state = 'off', lastSent = '', info = { next: '', lie: '' }, issue = null, cooldownUntil = 0, lastRes = null;
-  let lastTouch = Date.now(), lastActive = Date.now(), dark = false;
   const ftimes = [];
-  const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000;
   const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
   let lastShot = null;
   let frameClock=FrameClock.create(),generation=0,callbackId=null,callbackKind=null;
-  const diagnostic={version:'15-alpha1',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
+  const diagnostic={version:'15-alpha2',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
   function record(kind,data){diagnostic.events.push({kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null,...data});if(diagnostic.events.length>250)diagnostic.events.shift();}
   $('exportDiagnostics').onclick=()=>{
     const copy={...diagnostic,frameClock:{...frameClock.stats},settings:{...S},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
@@ -1130,8 +1132,9 @@ const Cam = (() => {
     remove: ['ボールをどけてください', '何もない置き場所を覚えます。ボールを手でどけて、少し待ってください(そのまま1球打ってもOK)'],
     moved: ['カメラが動いています', '三脚などに固定してください。止まると再開します'],
     clear: ['置き場所を確認中', 'ボールがない状態で少し待ってください'],
-    wait: ['ボールを置いてください', '置いたら映像のボールをタップ(点線の丸の所に置けば自動でも見つけます)'],
+    wait: ['次のボールを自動で探しています', '最初と同じ場所に置き、手とクラブを少し離してください。タップは不要です'],
     ready: ['打ってOK', ''],
+    armed: ['球の移動を確認中', 'クラブで球が隠れている場合はそのまま打てます。飛行球を確認できたら計測します'],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
     error: ['もう一度どうぞ', '']
@@ -1148,11 +1151,10 @@ const Cam = (() => {
     $('camStatus').dataset.state = s === 'adjust' || s === 'moved' ? 'error' : s === 'setup' || s === 'remove' || s === 'clear' ? 'tap' : s;
     $('stateText').textContent = t[0];
     $('stateSub').textContent = sub || (s === 'ready' && infoLine()) || t[1];
-    $('boText').textContent = t[0];
     pushStatus();
   }
   function pushStatus(force) {
-    const st = state === 'ready' ? 'ready' : state === 'track' ? 'track' : state === 'off' ? 'off' : state === 'adjust' ? 'adjust' : 'wait';
+    const st = state === 'ready' ? 'ready' : state === 'armed' ? 'armed' : state === 'track' ? 'track' : state === 'off' ? 'off' : state === 'adjust' ? 'adjust' : 'wait';
     const key = st + (st === 'adjust' ? issue : '');
     if (!force && key === lastSent) return;
     lastSent = key; Net.send(st === 'adjust' ? { type: 'status', state: st, issue: issue === 'far' ? 'far' : issue === 'landscape' ? 'portrait' : 'near' } : { type: 'status', state: st });
@@ -1221,7 +1223,7 @@ const Cam = (() => {
     $('stageEmpty').hidden = true;
     if (!motionOK0) toast('傾きセンサーを使えないため、iPhoneは水平として計算します');
     try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) { wake = null; }
-    running = true; lastTouch = lastActive = Date.now(); setButtons();
+    running = true; setButtons();
     newSession(); loop();
     } finally {start.pending=false;$('camStart').disabled=false;}
   }
@@ -1232,7 +1234,7 @@ const Cam = (() => {
     vid.srcObject = null;
     window.removeEventListener('devicemotion', onMotion); gAvg = null;
     try { if (wake) wake.release(); } catch (e) {} wake = null;
-    $('stageEmpty').hidden = false; setButtons(); setDark(false);
+    $('stageEmpty').hidden = false; setButtons();
     octx.clearRect(0, 0, ov.width, ov.height);
     sess=null;lastRes=null;lastShot=null;scratch.width=scratch.height=1;tiny.width=tiny.height=1;
     setState('off', msg);
@@ -1247,18 +1249,18 @@ const Cam = (() => {
   };
   showFacing();
   $('camStop').onclick = () => stop();
-  $('reTee').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } store.set(teeKey(), null); newSession(); setDark(false); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+  $('reTee').onclick = () => { if (!running) { toast('先に「カメラを開始」を押してください'); return; } store.set(teeKey(), null); newSession(); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
   document.addEventListener('visibilitychange', () => { if (document.hidden && running) stop('画面を離れたのでカメラを止めました。「カメラを開始」で再開します'); });
   window.addEventListener('pagehide', () => { if (running) stop(); });
 
-  // 省電力
-  function setDark(on) { dark = on; $('blackout').hidden = !on; }
-  document.addEventListener('pointerdown', () => { lastTouch = lastActive = Date.now(); if (dark) setDark(false); }, true);
+  // Keep the camera and preview active until the user stops or leaves the page.
   setInterval(() => {
     if (!running || role !== 'camera') return;
-    const now = Date.now(); showTilt();
-    if (now - lastActive > IDLE_STOP) { stop('10分間打たなかったので、カメラを休止しました。「カメラを開始」で再開します'); return; }
-    if (!dark && state !== 'setup' && state !== 'remove' && state !== 'moved' && state !== 'adjust' && now - lastTouch > IDLE_DARK) setDark(true);
+    showTilt();
+    const f=ftimes.length>1?(ftimes.length-1)/(ftimes[ftimes.length-1]-ftimes[0]):0;
+    const phase={setup:'初回登録待ち',ready:'ボール待機',armed:'球の移動を確認中',track:'飛行球を追跡中',after:'次の球の準備中',wait:'次の球を自動検出中',moved:'カメラ移動の確認中'};
+    $('liveDiagnostic').textContent=`映像処理 ${Math.round(f)}fps ・ ${phase[sess?.state]||sess?.state||'開始中'} ・ 追跡 ${sess?.obs.length||0}点`;
+    diagnostic.health={state:sess?.state,frames:diagnostic.frames,fps:Math.round(f),observations:sess?.obs.length||0};
     if (state === 'ready' || state === 'adjust') pushStatus(true);
   }, 1000);
 
@@ -1276,14 +1278,14 @@ const Cam = (() => {
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
     const ev = sess.tapReady(frameObj, nx * VW, ny * VH, frameClock.latest ? frameClock.latest.time : 0);
-    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball}); issue = VW > VH ? 'landscape' : ev.issue || null; lastTouch = Date.now(); setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
+    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball}); issue = VW > VH ? 'landscape' : ev.issue || null; setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
     else toast('ボールが見つかりませんでした。ボールの真ん中をタップしてください');
   });
 
   // ---- 結果 ----
   const WHY = { none: '飛んでいくボールが見つかりませんでした', short: '追えたコマが少なすぎました', odd: '計測値が不自然でした' };
   function onResult(res) {
-    lastRes = res; lastActive = Date.now();
+    lastRes = res;
     const {obs,...summary}=res;record('result',{...summary,observationCount:obs?obs.length:0});
     if (!res.ok) { setState('error', `${WHY[res.why] || '計測できませんでした'}。部屋を明るくし、ボールの上側の背景がボールと違う色になるようにしてください`); cooldownUntil = performance.now() + 2000; return; }
     const cv = PHYS.plasticLaunch(res.speed, res.angle, { massG: S.mass, diamMM: S.diam, cor: S.cor, attack: S.attack });
@@ -1342,7 +1344,7 @@ const Cam = (() => {
   function frame(t) {
     ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
     if (vid.videoWidth !== VW || vid.videoHeight !== VH) { VW = vid.videoWidth; VH = vid.videoHeight; newSession(); }
-    if (performance.now() < cooldownUntil && sess.state !== 'track') { if (!dark) drawOverlay(); return; }
+    if (performance.now() < cooldownUntil && sess.state !== 'track') { drawOverlay(); return; }
     if (state === 'done' || state === 'error') setState(sess.state === 'ready' ? 'ready' : 'wait');
     const ev = sess.feed(frameObj, t);
     if (ev) {
@@ -1354,12 +1356,14 @@ const Cam = (() => {
         if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
       } else if (ev.ev === 'result') onResult(ev.res);
       else if (ev.ev === 'calib') {const {obs,...summary}=ev.res;record('refinement',{...summary,applied:false});lastRes=ev.res;} // Automatic model learning disabled pending validation.
+      else if (ev.ev === 'lostball') setState('wait', '飛行球を確定できませんでした。次の球は同じ場所に置いてください。自動で準備します');
       else if (ev.ev === 'back') setState(ev.state === 'remove' ? 'remove' : 'wait');
       else if (ev.ev === 'retap') { store.set(teeKey(), null); setState('setup', 'カメラの向きが変わったので、置き場所を登録し直します。映像のボールをタップしてください'); }
       else if (EVS[ev.ev] && state !== EVS[ev.ev]) setState(EVS[ev.ev]);
-    } else if (sess.state === 'ready' && state !== 'ready' && state !== 'adjust') setState('ready');
+    } else if (sess.state === 'armed' && state !== 'armed') {record('armed',{});setState('armed');}
+    else if (sess.state === 'ready' && state !== 'ready' && state !== 'adjust') setState('ready');
     else if (sess.state === 'wait' && state === 'ready') setState('wait');
-    if (!dark) drawOverlay();
+    drawOverlay();
   }
   // 1コマの処理でエラーが出ても止まらないようにし、内容を画面に出す(原因を調べるため)
   let errShown = 0;
@@ -1768,14 +1772,14 @@ const App = (() => {
 
   const num = (v, a, b) => { v = Number(v); return Number.isFinite(v) ? clamp(v, a, b) : null; };
   function onMessage(m) {
-    if (m.type === 'status') { if (['wait', 'ready', 'track', 'off', 'adjust'].includes(m.state)) setReady(m.state, ['portrait', 'near', 'far'].includes(m.issue) ? m.issue : 'near'); return; }
+    if (m.type === 'status') { if (['wait', 'ready', 'armed', 'track', 'off', 'adjust'].includes(m.state)) setReady(m.state, ['portrait', 'near', 'far'].includes(m.issue) ? m.issue : 'near'); return; }
     if (m.type === 'shot') {
       const s = { id: String(m.id || '').slice(0, 32), speed: num(m.speed, 0.3, 60), angle: num(m.angle, 0, 80), dir: num(m.dir, -30, 30) ?? 0, axis: num(m.axis, -35, 35) ?? 0, spin: num(m.spin, 0, 12000), club: num(m.club, 0, 60), massG: num(m.massG, 1, 30) ?? 5, diamMM: num(m.diamMM, 30, 80) ?? 42, drag: num(m.drag, 0.4, 2.5) ?? 1 };
       if (!s.id || s.speed == null || s.angle == null || s.spin == null) return;
       onShot(s);
     }
   }
-  const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中…' };
+  const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: '同じ場所に次の球を置いてください（自動認識）', ready: '打ってOK', armed: '球の移動を確認中', track: '計測中…' };
   const ADJUST_TEXT = { portrait: 'iPhoneを縦向きにしてください', near: 'カメラが近すぎます。距離設定と置き方を確認してください', far: 'カメラが遠すぎます。少し近づけてください' };
   function setReady(s, iss) {
     const was = readyState; readyState = s;
