@@ -7,13 +7,13 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="theme-color" content="#173a25">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>おうちアプローチ｜検証用 D3</title>
+<title>おうちアプローチ｜検証用 横撮影 S1</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css?v=15D3">
+<link rel="stylesheet" href="style.css?v=sideS1">
 </head>
 <body>
 
-<div class="test-banner"><strong>計測の検証用</strong><span>D3 · 完成版ではありません</span></div>
+<div class="test-banner"><strong>計測の検証用</strong><span>横撮影 S1 · 完成版ではありません</span></div>
 <header class="top">
   <p class="brand"><span class="flagmark" aria-hidden="true"></span>おうちアプローチ</p>
   <span class="pill" id="connPill"><i class="dot" id="connDot"></i><span id="connText">未接続</span></span>
@@ -39,7 +39,7 @@
 
   <section class="statuscard" id="camStatus" data-state="off">
     <b id="stateText">カメラを開始してください</b>
-    <span id="stateSub">ボールの真後ろ・床に近い低い位置に縦向きで固定し、実際の距離を設定してください</span>
+    <span id="stateSub">打つ人の反対側から、横向きで球と打ち出す先を映します</span>
   </section>
 
   <p class="capture-status" id="liveDiagnostic" aria-live="polite">映像処理：カメラ開始待ち</p>
@@ -55,10 +55,12 @@
   </div>
   <section class="card setup-guide">
     <h2>① iPhoneの置き方</h2>
-    <p class="placement-line">iPhone → <b>1.20m</b> → 球 → 狙うカゴ</p>
-    <p>真後ろ・縦向き・背面カメラ。低い位置に固定し、球とカゴが同じ方向に見えるようにします。</p>
-    <p class="note">1.20mは今回の検証配置です。レンズから球の中心まで測り、下の距離設定を合わせてください。高さの最適値は検証中です。</p>
-          <div class="field"><label for="sDist">カメラからボールまでの距離</label><output id="oDist"></output><input id="sDist" type="range" min="1" max="3.5" step="0.01" value="1.8"></div>
+    <div class="side-placement" aria-label="上から見た配置：打つ人、球、iPhoneが向かい合い、打球はその線と直角に進みます"><span>打つ人</span><b>● 球　→ 打つ方向</b><span>↕ 約1.5m（実測）</span><strong>iPhone · 横向き</strong></div>
+    <p>打つ人の反対側・横向き・背面カメラ。打つ方向に対して真横から撮り、球の先0.5〜1mが映るように固定します。</p>
+    <p class="note">初期検証は球から約1.5m、低い位置でカメラをなるべく水平に。クラブの通り道の外に固定してください。距離はレンズから球までの実測値に合わせます。球径の設定と白い認識円の一致が速度の基準になります。</p>
+          <div class="field"><label for="sDist">カメラからボールまでの距離</label><output id="oDist"></output><input id="sDist" type="range" min="1" max="3.5" step="0.01" value="1.5"></div>
+    <label for="sideDirection">画面の中で球が進む方向</label>
+    <select id="sideDirection"><option value="1">左から右 →（球を左寄りに）</option><option value="-1">右から左 ←（球を右寄りに）</option></select>
     <h2>② 最初の球だけタップ</h2>
     <p>白い点線の円が球に重なることを確認。2球目以降は同じ場所に置けば自動認識します。</p>
     <h2>③ 1球打って確認</h2>
@@ -82,10 +84,10 @@
   </div>
   <section class="card" id="camResult" hidden>
     <div class="readout four">
-      <div><span>球速（推定）</span><b id="cSpeed">–</b></div>
+      <div><span>平面内速度（推定）</span><b id="cSpeed">–</b></div>
       <div><span>打ち出し角（推定）</span><b id="cAngle">–</b></div>
-      <div><span>左右（推定）</span><b id="cDir">–</b></div>
-      <div><span>スピン(推定)</span><b id="cSpin">–</b></div>
+      <div><span>左右（未測定）</span><b id="cDir">–</b></div>
+      <div><span>スピン（未測定）</span><b id="cSpin">–</b></div>
     </div>
     <p class="note mt" id="cMeta"></p>
     <div class="corhelp mt" id="carryFix" hidden>
@@ -105,6 +107,7 @@
 
       <div class="field"><label for="sDiam">ボールの直径</label><output id="oDiam"></output><input id="sDiam" type="range" min="30" max="80" step="0.5" value="42"></div>
       <div class="field"><label for="sMass">練習ボールの重さ</label><output id="oMass"></output><input id="sMass" type="range" min="2" max="20" step="0.5" value="5"></div>
+      <div hidden>
       <div class="field"><label for="sCor">練習ボールの反発係数</label><output id="oCor"></output><input id="sCor" type="range" min="0.3" max="0.85" step="0.01" value="0.55"></div>
       <div class="corhelp">
         <label for="dropCm">1mの高さから硬い床に落として、跳ね返った高さ</label>
@@ -113,12 +116,14 @@
       </div>
       <div class="field"><label for="sAttack">入射角(クラブが下りながら当たる角度)</label><output id="oAttack"></output><input id="sAttack" type="range" min="-8" max="2" step="0.5" value="-3"></div>
       <div class="field"><label for="sSens">検出の感度</label><output id="oSens"></output><input id="sSens" type="range" min="0.5" max="2" step="0.05" value="1"></div>
-      <p class="note">ボールの境目(2色の境)は、飛ばす方向に向けて縦にまっすぐ置きます。回転軸はまだ測定できません。弾道表示は回転軸0°を仮定しています。</p>
+      </div>
+      <p class="note">球の直径が速度の基準です。球の輪郭に白い円が合うか確認してください。左右方向・スピンは測定せず0を仮定した弾道を表示します。</p>
     </div>
   </details>
 </main>
 <!-- ============ iPad: 1画面だけ ============ -->
 <main id="playView" hidden>
+  <p class="note side-warning">横撮影 S1：速度・角度は平面内の推定。左右方向・スピンは未測定で、0を仮定した参考弾道です。</p>
   <section class="minw0">
     <div class="world" id="world" data-ready="off">
       <div class="teesign"><span class="par">カップまで</span><b id="pinOut">5.41 m</b><span class="s"><span id="lieOut">マット</span>から打って、カップに入れよう</span></div>
@@ -130,8 +135,8 @@
       </div>
       <div class="ready" id="readyMark" data-state="off"><i aria-hidden="true"></i><span id="readyText">iPhoneのカメラ待ち</span></div>
       <div class="board six">
-        <div><span>左右（推定）</span><b id="gDir">–</b><em>度</em></div>
-        <div><span>球速（推定）</span><b id="gSpeed">–</b><em>m/s</em></div>
+        <div><span>左右（未測定）</span><b id="gDir">–</b><em>度</em></div>
+        <div><span>平面内速度（推定）</span><b id="gSpeed">–</b><em>m/s</em></div>
         <div><span>打ち出し角（推定）</span><b id="gAngle">–</b><em>度</em></div>
         <div><span>キャリー（計算）</span><b id="gCarry">–</b><em>m</em></div>
         <div><span>総距離（計算）</span><b id="gTotal">–</b><em>m</em></div>
@@ -176,9 +181,9 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="vendor/three.min.js?v=15D3"></script>
-<script src="vendor/peerjs.min.js?v=15D3"></script>
-<script src="vendor/qrcode.js?v=15D3"></script>
-<script src="app.js?v=15D3"></script>
+<script src="vendor/three.min.js?v=sideS1"></script>
+<script src="vendor/peerjs.min.js?v=sideS1"></script>
+<script src="vendor/qrcode.js?v=sideS1"></script>
+<script src="app.js?v=sideS1"></script>
 </body>
 </html>

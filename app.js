@@ -150,7 +150,9 @@ const PHYS = (() => {
     let vx = shot.speed * Math.cos(th) * hx, vy = shot.speed * Math.sin(th), vz = shot.speed * Math.cos(th) * hz;
     let w = shot.spin * 2 * Math.PI / 60;                      // バックスピン(rad/s、+が逆回転)
     const pts = [[0, x, y, z]];
-    let t = 0, phase = 'air', carry = null, holed = false, hazard = null, apex = 0, landAngle = null, bounces = 0, backed = false;
+    const groundOnly=shot.kind==='ground';
+    if(groundOnly)vy=0;
+    let t = 0, phase = groundOnly?'ground':'air', carry = groundOnly?{x,z}:null, holed = false, hazard = null, apex = 0, landAngle = null, bounces = 0, backed = false;
     const cup = c.pin, CUP_R = 0.054;
     const ax = (shot.axis || 0) * deg, ca = Math.cos(ax), sa = Math.sin(ax);
     const acc = (vx, vy, vz, w) => {
@@ -890,7 +892,134 @@ const DTL = (() => {
       get emptyReady() { return !!empty; }, get thumb() { return thumb; }
     };
   }
-  return { session, findCircle };
+  return { session, findCircle, vision: {diffMask,closeOpen,blobs,palette} };
+})();
+
+// Side-view prototype. All coordinates are image measurements; the launch
+// estimate assumes motion in a plane parallel to the image and a fixed camera.
+const SIDE = (() => {
+  const V=DTL.vision;
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  function fitLine(q,key){
+    const mt=q.reduce((s,p)=>s+p.t,0)/q.length,my=q.reduce((s,p)=>s+p[key],0)/q.length;
+    let den=0,num=0;for(const p of q){den+=(p.t-mt)**2;num+=(p.t-mt)*(p[key]-my);}
+    if(den<1e-8)return null;const slope=num/den;return {slope,intercept:my-slope*mt};
+  }
+  function estimate(obs,ball,axis,diamMM){
+    const result={ok:false,why:'short',n:obs.length,obs:obs.map(p=>({...p})),mode:'side',dir:0,axis:0,spin:0,directionSource:'assumed-zero',spinSource:'assumed-zero'};
+    if(obs.length<4)return result;
+    const mpp=diamMM/1000/(2*ball.r),first=obs[0].t;
+    const q=obs.slice(0,8).filter(p=>p.t-first<=.2).map(p=>({t:p.t-first,x:((p.u-ball.x)*axis.f[0]+(p.v-ball.y)*axis.f[1])*mpp,y:((p.u-ball.x)*axis.u[0]+(p.v-ball.y)*axis.u[1])*mpp}));
+    if(q.length<4||q.at(-1).t<.04)return result;
+    const ground=Math.max(...q.map(p=>Math.abs(p.y)))<Math.max(.015,diamMM/1000*.45);
+    const g=ground?0:9.81;for(const p of q)p.yFit=p.y+.5*g*p.t*p.t;
+    const fx=fitLine(q,'x'),fy=fitLine(q,'yFit');if(!fx||!fy)return result;
+    const back=fx.intercept/fx.slope,vy=ground?0:fy.slope+g*back;
+    const speed=Math.hypot(fx.slope,vy),angle=Math.atan2(vy,fx.slope)*180/Math.PI;
+    const rms=Math.sqrt(q.reduce((s,p)=>s+(p.x-fx.intercept-fx.slope*p.t)**2+(p.yFit-fy.intercept-fy.slope*p.t)**2,0)/(2*q.length));
+    const originHeight=fy.intercept-fy.slope*back-.5*g*back*back;
+    Object.assign(result,{why:'odd',speed,angle,rms:rms/mpp,rmsMeters:rms,impactT:first-back,kind:ground?'ground':'flight',velocityPlane:[fx.slope,vy],scaleMetersPerPixel:mpp});
+    if(![speed,angle,rms,back,originHeight].every(Number.isFinite)||speed<.3||speed>15||fx.slope<=0||angle<0||angle>75||back<-.02||back>.25||rms>Math.max(.008,diamMM/1000*.4)||Math.abs(originHeight)>.07)return result;
+    result.ok=true;delete result.why;return result;
+  }
+  function session(opt){
+    let state='setup',tee=null,ball=null,colors=null,reference=null,obs=[],axis={f:[1,0],u:[0,-1]},last=-Infinity,stableSince=null,staticPrevious=null,lastReference=-Infinity,missed=0,lastResult=-Infinity;
+    const counts={};const count=k=>counts[k]=(counts[k]||0)+1;
+    const o=()=>opt();
+    function reduced(R){
+      const step=Math.max(1,Math.ceil(R.w/640)),w=Math.ceil(R.w/step),h=Math.ceil(R.h/step),d=new Uint8ClampedArray(w*h*4);
+      for(let y=0;y<h;y++)for(let x=0;x<w;x++){const src=(Math.min(R.h-1,y*step)*R.w+Math.min(R.w-1,x*step))*4;d.set(R.d.subarray(src,src+4),(y*w+x)*4);}
+      return {x:R.x,y:R.y,w,h,d,step};
+    }
+    function capture(fr){
+      const y=Math.max(0,Math.floor(tee.y-fr.H*.65));
+      const h=Math.min(fr.H-y,Math.ceil(tee.y+tee.r*5)-y);
+      return reduced(fr.roi(0,y,fr.W,h));
+    }
+    function learnColors(fr,b){
+      const R=fr.roi(Math.floor(b.x-b.r),Math.floor(b.y-b.r),Math.ceil(b.r*2+1),Math.ceil(b.r*2+1)),mask=new Uint8Array(R.w*R.h);
+      for(let y=0;y<R.h;y++)for(let x=0;x<R.w;x++)if(Math.hypot(x+R.x-b.x,y+R.y-b.y)<b.r*.8)mask[y*R.w+x]=1;
+      return V.palette(R,mask);
+    }
+    function tapReady(fr,x,y,t){
+      const initial=DTL.session(()=>({...o(),fpx:null})).tapReady(fr,x,y,t);
+      if(initial.ev!=='ready')return initial;
+      ball={...initial.ball};tee={...ball};colors=learnColors(fr,ball);
+      if(!colors){state='setup';return {ev:'tapfail'};}
+      const up=o().up,un=up?Math.hypot(up[0],up[1]):0;
+      axis.u=un>.5?[up[0]/un,up[1]/un]:[0,-1];if(axis.u[1]>0)axis.u=axis.u.map(v=>-v);
+      const sign=o().direction===-1?-1:1;axis.f=[-axis.u[1]*sign,axis.u[0]*sign];
+      reference=capture(fr);obs=[];state='ready';stableSince=null;staticPrevious=null;last=t;lastResult=-Infinity;
+      return {ev:'ready',ball:{...ball},tee:{...tee},issue:null};
+    }
+    function candidates(R,flight){
+      const n=R.w*R.h,mask=new Uint8Array(n),diff=flight&&reference&&reference.w===R.w&&reference.h===R.h?V.diffMask(R,reference,55):null;
+      for(let k=0;k<n;k++){
+        if(flight&&(!diff||!diff[k]))continue;const i=k*4;
+        const distance=Math.min(...colors.c.map(c=>Math.abs(R.d[i]-c[0])+Math.abs(R.d[i+1]-c[1])+Math.abs(R.d[i+2]-c[2])));
+        if(distance<100)mask[k]=1;
+      }
+      const d0=2*tee.r/R.step,out=[];
+      for(const b of V.blobs(V.closeOpen(mask,R.w,R.h),R.w,R.h,Math.max(4,.12*d0*d0))){
+        count('candidates');const minor=Math.min(b.bw,b.bh),major=Math.max(b.bw,b.bh),ratio=major/minor;
+        if(minor<.45*d0||minor>1.5*d0||ratio>(flight?3.5:1.45)||b.n<.35*Math.PI*(d0/2)**2||b.n>.9*Math.PI*d0*d0){count('rejectShape');continue;}
+        const u=R.x+b.x*R.step,v=R.y+b.y*R.step;
+        if(!flight){if(Math.hypot(u-tee.x,v-tee.y)>2*tee.r)continue;}
+        else{
+          const forward=(u-ball.x)*axis.f[0]+(v-ball.y)*axis.f[1],height=(u-ball.x)*axis.u[0]+(v-ball.y)*axis.u[1];
+          if(forward<1.5*ball.r||height<-1.3*ball.r){count('rejectPosition');continue;}
+        }
+        out.push({u,v,d:minor*R.step});
+      }
+      return out;
+    }
+    function finish(t){
+      const res=estimate(obs,ball,axis,o().diamMM||42);state='wait';lastResult=t;stableSince=null;staticPrevious=null;count(res.ok?'results':'rejectedResults');
+      return {ev:'result',res};
+    }
+    function feed(fr,t){
+      if(!Number.isFinite(t)||t<=last){count('duplicateFrames');return null;}last=t;
+      if(!tee||state==='setup')return null;count('frames');
+      if(state==='wait'||state==='ready'||state==='armed'){
+        const R=reduced(fr.roi(Math.floor(tee.x-3*tee.r),Math.floor(tee.y-3*tee.r),Math.ceil(6*tee.r),Math.ceil(6*tee.r)));
+        const resting=candidates(R,false).sort((a,b)=>Math.hypot(a.u-tee.x,a.v-tee.y)-Math.hypot(b.u-tee.x,b.v-tee.y))[0];
+        if(resting){
+          if(!staticPrevious||Math.hypot(resting.u-staticPrevious.u,resting.v-staticPrevious.v)>tee.r*.35)stableSince=t;
+          if(stableSince===null)stableSince=t;staticPrevious=resting;
+          if(state!=='ready'&&t-stableSince>=.25&&t-lastResult>.3){ball={x:resting.u,y:resting.v,r:tee.r};state='ready';obs=[];reference=capture(fr);lastReference=t;colors=learnColors(fr,ball);count('automaticReady');return {ev:'ready',ball:{...ball}};}
+          if(state==='ready'){if(t-lastReference>.3){reference=capture(fr);lastReference=t;}return null;}
+        }else{stableSince=null;staticPrevious=null;if(state==='ready'){state='armed';obs=[];missed=0;}}
+        if(state==='wait')return null;
+      }
+      if(state==='armed'||state==='track'){
+        const R=capture(fr);
+        count('searchFrames');let best=null,bestScore=Infinity;
+        const prev=obs.at(-1),older=obs.at(-2);
+        for(const c of candidates(R,true)){
+          let score;
+          if(prev){
+            const dt=t-prev.t;if(dt>.15)continue;
+            const dx=c.u-prev.u,dy=c.v-prev.v,forward=dx*axis.f[0]+dy*axis.f[1];
+            const speed=Math.hypot(dx,dy)*(o().diamMM||42)/1000/(2*ball.r)/dt;
+            if(forward<ball.r*.15||speed<.3||speed>15){count('rejectMotion');continue;}
+            const factor=older?dt/(prev.t-older.t):0;
+            score=Math.hypot(c.u-prev.u-(older?prev.u-older.u:0)*factor,c.v-prev.v-(older?prev.v-older.v:0)*factor);
+            if(older&&score>Math.max(ball.r*2,Math.hypot(dx,dy)*.45)){count('rejectPrediction');continue;}
+          }else score=Math.hypot(c.u-ball.x,c.v-ball.y);
+          if(score<bestScore){best=c;bestScore=score;}
+        }
+        if(best){obs.push({...best,t});missed=0;count('candidateFrames');}
+        else{missed++;count('noCandidateFrames');}
+        if(state==='armed'){
+          if(obs.length>=3){state='track';count('confirmedTracks');return {ev:'track'};}
+          if(missed>=2){obs=[];missed=0;}
+        }else if(obs.length>=6||missed>=3||t-obs[0].t>.25)return finish(t);
+      }
+      return null;
+    }
+    return {tapReady,feed,reset(){state='setup';tee=null;reference=null;colors=null;obs=[];},get state(){return state;},get tee(){return tee;},get ball(){return ball;},get obs(){return obs;},get cand(){return null;},get progress(){return state==='ready'||state==='armed'?1:0;},get diagnostics(){return {...counts,mode:'side',axis,assumption:'parallel-plane, scale-from-ball-diameter'};}};
+  }
+  return {session,estimate};
 })();
 
 // Frame identity and elapsed video time are distinct from wall-clock processing time.
@@ -1085,13 +1214,13 @@ const Cam = (() => {
   let facing = store.get('facing', 'environment') === 'user' ? 'user' : 'environment';
   let state = 'off', lastSent = '', info = { next: '', lie: '' }, issue = null, cooldownUntil = 0, lastRes = null;
   const ftimes = [];
-  const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
+  const S = { direction:store.get('sideDirection',1),dist: store.get('sideDist', 1.5), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
   let lastShot = null;
   let frameClock=FrameClock.create(),generation=0,callbackId=null,callbackKind=null;
-  const diagnostic={version:'15-D3',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
-  function record(kind,data){diagnostic.events.push({kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null,...data});if(diagnostic.events.length>250)diagnostic.events.shift();}
+  const diagnostic={version:'side-S1',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
+  function record(kind,data){diagnostic.events.push({...data,kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null});if(diagnostic.events.length>250)diagnostic.events.shift();}
   function exportDiagnostics(){
-    const copy={...diagnostic,tracker:sess?sess.diagnostics:null,registration:sess?{tee:sess.tee,ball:sess.ball}:null,frameClock:{...frameClock.stats},settings:{...S,fpx:store.get(fKey(),null)},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
+    const copy={...diagnostic,tracker:sess?sess.diagnostics:null,registration:sess?{tee:sess.tee,ball:sess.ball}:null,frameClock:{...frameClock.stats},settings:{...S,captureMode:'side',scale:'ball-diameter'},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
     const url=URL.createObjectURL(new Blob([JSON.stringify(copy,null,2)],{type:'application/json'}));
     const a=document.createElement('a');a.href=url;a.download='ouchi-diagnostics-'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   };
@@ -1148,7 +1277,7 @@ const Cam = (() => {
   $('dragReset').onclick = () => { S.drag = 1; store.set('drag', 1); showDrag(); toast('空気抵抗の補正を元に戻しました'); };
   [['sDist','oDist','dist',v=>v.toFixed(2)+' m'],['sDiam','oDiam','diam',v=>v.toFixed(1)+' mm'],['sMass','oMass','mass',v=>v.toFixed(1)+' g'],['sCor','oCor','cor',v=>v.toFixed(2)],
    ['sAttack','oAttack','attack',v=>v.toFixed(1)+'°'],['sSens','oSens','sens',v=>'×'+v.toFixed(2)]]
-  .forEach(([s,o,k,f]) => { const e=$(s); e.value=S[k]; $(o).textContent=f(+e.value); e.oninput=()=>{ S[k]=+e.value; $(o).textContent=f(+e.value); store.set(k,+e.value); }; });
+  .forEach(([s,o,k,f]) => { const e=$(s); e.value=S[k]; $(o).textContent=f(+e.value); e.oninput=()=>{ S[k]=+e.value; $(o).textContent=f(+e.value); store.set(k==='dist'?'sideDist':k,+e.value);if(running)newSession(); }; });
   showDrag();
   $('dropApply').onclick = () => {
     const h = Number($('dropCm').value);
@@ -1160,7 +1289,7 @@ const Cam = (() => {
 
   // ---- 状態の表示 ----
   const TEXT = {
-    off: ['カメラを開始してください', 'ボールの真後ろ・床に近い低い位置に縦向きで固定し、実際の距離を設定してください'],
+    off: ['カメラを開始してください', '打つ人の反対側に横向きで固定し、球の進む方向を選んでください'],
     setup: ['ボールをタップ', 'ボールを置いて、映像の中のボールをタップすると、すぐ「打ってOK」になります'],
     remove: ['ボールをどけてください', '何もない置き場所を覚えます。ボールを手でどけて、少し待ってください(そのまま1球打ってもOK)'],
     moved: ['カメラが動いています', '三脚などに固定してください。止まると再開します'],
@@ -1173,9 +1302,9 @@ const Cam = (() => {
     error: ['もう一度どうぞ', '']
   };
   const ISSUE = {
-    near: ['カメラが近すぎます', 'ボールから1.8mくらい離してください'],
-    far: ['カメラが遠すぎます', 'ボールが小さすぎます。1.8mくらいまで近づけてください'],
-    landscape: ['iPhoneを縦向きにしてください', '縦向きのほうが、上がっていくボールを長く追えます']
+    near: ['カメラが近すぎます', '球の先まで映る位置で、距離設定を確認してください'],
+    far: ['球が小さすぎます', 'クラブの通り道を避け、球がはっきり映る位置に調整してください'],
+    landscape: ['iPhoneを横向きにしてください', '球の進む側を広く映してください']
   };
   function infoLine() { return info.lie ? `${info.lie}から打つ` : ''; }
   function setState(s, sub) {
@@ -1220,9 +1349,10 @@ const Cam = (() => {
   const teeKey = () => `tee_${facing}_${VW}x${VH}`;
   // 測ったボールの大きさから、カメラの焦点距離(画面の縦向き1080px幅あたり)を覚える。次のタップの見込みに使う
   const fKey = () => 'fpx_' + facing;
-  function learnF(b) { if (!b || !b.r || !VW) return; const f = (2 * b.r) * S.dist / (S.diam / 1000) * 1080 / Math.min(VW, VH); if (f > 500 && f < 4000) { const old = store.get(fKey(), null); store.set(fKey(), old ? old * 0.7 + f * 0.3 : f); } }
+  function learnF() {} // Rear-view focal history is not used in side-view mode.
+
   function newSession() {
-    sess = DTL.session(() => ({ fpx: store.get(fKey(), null), dist: S.dist, diamMM: S.diam, massG: S.mass, cor: S.cor, attack: S.attack, drag: S.drag, sens: S.sens, up: upCam(), maxObs: 100, maxT: 1.6 }));
+    sess = SIDE.session(() => ({direction:S.direction,dist:S.dist,diamMM:S.diam,sens:S.sens,up:upCam()}));
     setState('setup'); // Fresh registration; no persisted background images.
   }
 
@@ -1273,6 +1403,7 @@ const Cam = (() => {
     setState('off', msg);
   }
   $('camStart').onclick = start;
+  $('sideDirection').value=String(S.direction);$('sideDirection').onchange=()=>{S.direction=Number($('sideDirection').value);store.set('sideDirection',S.direction);if(running)newSession();};
   // 外カメラ/インカメラの切り替え
   const showFacing = () => { $('camFlip').textContent = facing === 'user' ? '外カメラに切り替え' : 'インカメラに切り替え'; };
   $('camFlip').onclick = async () => {
@@ -1314,7 +1445,7 @@ const Cam = (() => {
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
     const tapStart=performance.now();
     const ev = sess.tapReady(frameObj, nx * VW, ny * VH, frameClock.latest ? frameClock.latest.time : 0);
-    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball,processingMs:performance.now()-tapStart}); issue = VW > VH ? 'landscape' : ev.issue || null; setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
+    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball,processingMs:performance.now()-tapStart}); issue = VW < VH ? 'landscape' : ev.issue || null; setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
     else toast('ボールが見つかりませんでした。ボールの真ん中をタップしてください');
   });
 
@@ -1322,17 +1453,14 @@ const Cam = (() => {
   const WHY = { none: '飛んでいくボールが見つかりませんでした', short: '追えたコマが少なすぎました', odd: '計測値が不自然でした' };
   function onResult(res) {
     lastRes = res;
-    const {obs,...summary}=res;record('result',{...summary,observationCount:obs?obs.length:0});
+    const {obs,...summary}=res;record('result',{...summary,shotKind:res.kind,observationCount:obs?obs.length:0});
     if (!res.ok) { setState('error', `${WHY[res.why] || '計測できませんでした'}。部屋を明るくし、ボールの上側の背景がボールと違う色になるようにしてください`); cooldownUntil = performance.now() + 2000; return; }
-    const cv = PHYS.plasticLaunch(res.speed, res.angle, { massG: S.mass, diamMM: S.diam, cor: S.cor, attack: S.attack });
-    const speed = clamp(res.speed, 0.5, 40), angle = clamp(res.angle, 0, 80), spin = clamp(Math.round(cv.spin / 10) * 10, 0, 12000);
-    const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: +clamp(res.dir, -30, 30).toFixed(1), axis: +clamp(res.axis || 0, -35, 35).toFixed(1), spin,
-      club: +cv.clubSpeed.toFixed(2), loft: +cv.spinLoft.toFixed(1), massG: S.mass, diamMM: S.diam, drag: S.drag, version:15, provenance:{launch:'estimated',spin:'estimated',axis:'assumed-zero',trajectory:'simulated'}, quality:{n:res.n,rms:res.rms,pitchMeasured:!!upCam()} };
-    lastShot = shot; $('carryFix').hidden = false;
-    $('cSpeed').textContent = speed.toFixed(1) + ' m/s'; $('cAngle').textContent = angle.toFixed(1) + '°';
-    $('cDir').textContent = (shot.dir > 0.4 ? '右' : shot.dir < -0.4 ? '左' : '') + Math.abs(shot.dir).toFixed(1) + '°'; $('cSpin').textContent = spin + ' rpm';
-    const f = ftimes.length > 10 ? Math.round((ftimes.length - 1) / (ftimes[ftimes.length - 1] - ftimes[0])) : 0;
-    $('cMeta').textContent = `クラブ速度 ${cv.clubSpeed.toFixed(1)} m/s(推定)、回転軸は未測定（0°を仮定）、追跡 ${res.n} コマ・約${f}fps、当てはめ残差 ${res.rms.toFixed(1)}px（実精度ではありません）、空気抵抗の補正 ×${S.drag.toFixed(2)}`;
+    const speed=res.speed,angle=res.angle;
+    const shot={type:'shot',id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),speed,angle,dir:0,axis:0,spin:0,massG:S.mass,diamMM:S.diam,drag:S.drag,version:'side-S1',mode:'side',kind:res.kind,provenance:{launch:'plane-estimate',direction:'assumed-zero',spin:'assumed-zero',trajectory:'simulated'},quality:{n:res.n,rms:res.rms}};
+    lastShot=shot;$('carryFix').hidden=true;
+    $('cSpeed').textContent=speed.toFixed(1)+' m/s';$('cAngle').textContent=angle.toFixed(1)+'°';
+    $('cDir').textContent='未測定';$('cSpin').textContent='未測定';
+    $('cMeta').textContent=`${res.kind==='ground'?'転がり候補':'飛行候補'}・追跡 ${res.n}点・画面に平行な平面を仮定した推定。左右・スピンは未測定、表示用に0を仮定。`;
     $('camResult').hidden = false;
     const ok = Net.send(shot);record('send',{id:shot.id,sent:ok});
     setState('done', ok ? 'iPadを見てください' : 'iPadと未接続のため送れていません');
@@ -1382,7 +1510,7 @@ const Cam = (() => {
   function frame(t) {
     ftimes.push(t); if (ftimes.length > 30) ftimes.shift();
     if (vid.videoWidth !== VW || vid.videoHeight !== VH) { VW = vid.videoWidth; VH = vid.videoHeight; newSession(); }
-    if (performance.now() < cooldownUntil && sess.state !== 'track') { drawOverlay(); return; }
+    // Result presentation must never pause acquisition of the next shot.
     if (state === 'done' || state === 'error') setState(sess.state === 'ready' ? 'ready' : 'wait');
     const before=sess.state;
     const ev = sess.feed(frameObj, t);
@@ -1392,8 +1520,8 @@ const Cam = (() => {
       if (ev.ev === 'teeset') toast('置き場所を覚えました');
       if (ev.ev === 'ready') {
         learnF(ev.ball);
-        issue = VW > VH ? 'landscape' : ev.issue || null;
-        if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
+        issue = VW < VH ? 'landscape' : ev.issue || null;
+        if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '横向きにして、球の進む側を広く映してください' : undefined);
       } else if (ev.ev === 'result') onResult(ev.res);
       else if (ev.ev === 'calib') {const {obs,...summary}=ev.res;record('refinement',{...summary,applied:false});lastRes=ev.res;} // Automatic model learning disabled pending validation.
       else if (ev.ev === 'lostball') setState('wait', '飛行球を確定できませんでした。次の球は同じ場所に置いてください。自動で準備します');
@@ -1737,7 +1865,7 @@ const App = (() => {
   buildCourse();
   let readyState = 'off', paired = false, busy = false;
   let log = store.get('cupLog', []);                          // {d: ピンまで[m], in: true/false}
-  const seen = new Set();
+  const seen = new Set(), pendingShots=[];
   const fCm = (m) => m < 1 ? `${Math.round(m * 100)}cm` : `${m.toFixed(2)}m`;
   let ballSet = store.get('ballSet', { massG: 5, diamMM: 42, drag: 1 });
   World.onProgress((res, frac) => Profile.draw(res, frac));
@@ -1769,10 +1897,11 @@ const App = (() => {
     return res;
   }
   function onShot(s) {
-    if (seen.has(s.id)) return; seen.add(s.id);
-    if (busy || World.busy()) return;
+    if (seen.has(s.id)||pendingShots.some(p=>p.id===s.id)) return;
+    if (busy || World.busy()) {if(pendingShots.length<8)pendingShots.push(s);else toast('表示待ちがいっぱいです。弾道表示が終わるまで待ってください');return;}
+    seen.add(s.id);
     busy = true; $('banner').hidden = true;
-    $('gDir').textContent = Math.abs(s.dir || 0) < 0.5 ? '0' : (s.dir > 0 ? '右' : '左') + Math.abs(s.dir).toFixed(1); $('gSpeed').textContent = s.speed.toFixed(1); $('gAngle').textContent = s.angle.toFixed(0);
+    $('gDir').textContent = s.mode==='side'?'未測定':Math.abs(s.dir || 0) < 0.5 ? '0' : (s.dir > 0 ? '右' : '左') + Math.abs(s.dir).toFixed(1); $('gSpeed').textContent = s.speed.toFixed(1); $('gAngle').textContent = s.angle.toFixed(0);
     ['gCarry', 'gTotal', 'gPin'].forEach(id => { $(id).textContent = '…'; }); $('gPinU').textContent = '';
     const res = simulate(s);
     World.play(res, '#ffffff', () => finish(res));
@@ -1791,7 +1920,7 @@ const App = (() => {
     else banner(`${fCm(d)} ショート`, best ? 'ベスト更新' : null, 2400);
     World.addMarker(res.end.x, res.end.z, into ? '#ffd24a' : '#ffffff');
     render();
-    setTimeout(() => { World.setAim(COURSE.tee, 0, PIN_M + 0.6); busy = false; }, 1800);
+    setTimeout(() => { World.setAim(COURSE.tee, 0, PIN_M + 0.6); busy = false;if(pendingShots.length)onShot(pendingShots.shift()); }, 1800);
   }
   function render() {
     const n = log.length, ins = log.filter(l => l.in).length;
@@ -1814,13 +1943,13 @@ const App = (() => {
   function onMessage(m) {
     if (m.type === 'status') { if (['wait', 'ready', 'armed', 'track', 'off', 'adjust'].includes(m.state)) setReady(m.state, ['portrait', 'near', 'far'].includes(m.issue) ? m.issue : 'near'); return; }
     if (m.type === 'shot') {
-      const s = { id: String(m.id || '').slice(0, 32), speed: num(m.speed, 0.3, 60), angle: num(m.angle, 0, 80), dir: num(m.dir, -30, 30) ?? 0, axis: num(m.axis, -35, 35) ?? 0, spin: num(m.spin, 0, 12000), club: num(m.club, 0, 60), massG: num(m.massG, 1, 30) ?? 5, diamMM: num(m.diamMM, 30, 80) ?? 42, drag: num(m.drag, 0.4, 2.5) ?? 1 };
+      const s = { mode:m.mode==='side'?'side':null,kind:m.kind==='ground'?'ground':'flight',id: String(m.id || '').slice(0, 32), speed: num(m.speed, 0.3, 60), angle: num(m.angle, 0, 80), dir: num(m.dir, -30, 30) ?? 0, axis: num(m.axis, -35, 35) ?? 0, spin: num(m.spin, 0, 12000), club: num(m.club, 0, 60), massG: num(m.massG, 1, 30) ?? 5, diamMM: num(m.diamMM, 30, 80) ?? 42, drag: num(m.drag, 0.4, 2.5) ?? 1 };
       if (!s.id || s.speed == null || s.angle == null || s.spin == null) return;
       onShot(s);
     }
   }
   const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: '同じ場所に次の球を置いてください（自動認識）', ready: '打ってOK', armed: '打ってOK（球の登録を保持中）', track: '計測中…' };
-  const ADJUST_TEXT = { portrait: 'iPhoneを縦向きにしてください', near: 'カメラが近すぎます。距離設定と置き方を確認してください', far: 'カメラが遠すぎます。少し近づけてください' };
+  const ADJUST_TEXT = { portrait: 'iPhoneを横向きにしてください', near: 'カメラが近すぎます。距離設定と置き方を確認してください', far: 'カメラが遠すぎます。少し近づけてください' };
   function setReady(s, iss) {
     const was = readyState; readyState = s;
     $('readyMark').dataset.state = s==='armed'?'ready':s; $('world').dataset.ready = s==='armed'?'ready':s;

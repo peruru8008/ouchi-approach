@@ -297,3 +297,18 @@ table.log td.n{white-space:nowrap}
 .miss-button small{font-size:12px;font-weight:400}.diagnostic-dock>.btn:last-child{font-size:13px;padding:8px}
 @media(min-width:700px){.diagnostic-dock{left:50%;right:auto;transform:translateX(-50%);width:min(640px,100%);border-radius:12px 12px 0 0}}
 @media(max-width:380px){.test-banner{align-items:flex-start;flex-direction:column}.diagnostic-dock .miss-button{font-size:15px}}
+.side-placement{display:grid;gap:8px;padding:14px;text-align:center;background:#eef2f6;border-radius:8px;font-size:14px}
+#sideDirection{width:100%;padding:12px;font-size:16px;border:1px solid #8ba195;border-radius:8px;background:#fff;color:#16301f}
+.side-warning{grid-column:1/-1;background:#fff0ba;padding:10px;border-radius:8px}
+@media (orientation:landscape) and (max-height:550px){
+ body{padding:6px 12px}.test-banner{padding:4px 10px;margin-bottom:2px}.test-banner strong{font-size:15px}
+ .top{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;padding:0}.top .brand{font-size:14px}.top .linkbtn{font-size:12px}
+ #camView{display:grid;grid-template-columns:minmax(0,1fr) 245px;max-width:1100px;gap:6px;padding-bottom:120px}
+ #camView #stage{grid-column:1;grid-row:1/5;height:calc(100svh - 88px);min-height:150px}
+ #camStatus{grid-column:2;grid-row:1}#camView .statuscard{padding:7px}#camView .statuscard b{font-size:17px}#camView .statuscard span{font-size:11px}
+ #liveDiagnostic{grid-column:2;grid-row:2;font-size:11px;padding:5px}
+ #camView>.row{grid-column:2;grid-row:3}#camView>.row .btn{min-height:38px;font-size:14px;padding:6px 10px}#camFlip{display:none}
+ #camView>.setup-guide,#camPair,#camResult,#camView>details{grid-column:1/-1}
+ #camView .diagnostic-dock{left:auto;right:max(12px,calc((100vw - 1100px)/2));transform:none;width:245px;padding:6px;bottom:0;gap:5px;flex-wrap:wrap}
+ #camView .diagnostic-dock .miss-button{font-size:14px;width:100%;flex:auto;padding:6px}#camView .diagnostic-dock>.btn:last-child{width:100%;min-height:30px}
+}
