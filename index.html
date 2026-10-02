@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>おうちアプローチ</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css?v=15a2">
+<link rel="stylesheet" href="style.css?v=15diag1">
 </head>
 <body>
 
@@ -62,8 +62,10 @@
     <button class="btn" id="camStop" hidden>カメラを止める</button>
     <button class="btn" id="camFlip">インカメラに切り替え</button>
   </div>
-  <p class="note">カメラを開始するたびに、置いたボールを映像の上でタップして置き場所を登録します。カメラの傾きは「カメラを開始」のときに許可を求められる傾きセンサーで測ります。2球目以降は同じ場所に置けば自動で認識します。画面の自動暗転・無操作による停止はしません。<span class="ver">版 v15α2・検証用</span></p>
+  <p class="note">カメラを開始するたびに、置いたボールを映像の上でタップして置き場所を登録します。カメラの傾きは「カメラを開始」のときに許可を求められる傾きセンサーで測ります。2球目以降は同じ場所に置けば自動で認識します。画面の自動暗転・無操作による停止はしません。<span class="ver">版 v15 診断1</span></p>
 
+  <button class="btn" id="markMiss">打っても反応しなかった → 記録を保存</button>
+  <p class="note">最初の登録後、白い点線の円が球の輪郭に重なるか確認してください。記録に映像は含みません。</p>
   <p class="note" id="liveDiagnostic" aria-live="polite">映像処理：カメラ開始待ち</p>
   <section class="card" id="camResult" hidden>
     <div class="readout four">
@@ -162,9 +164,9 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="vendor/three.min.js?v=15a2"></script>
-<script src="vendor/peerjs.min.js?v=15a2"></script>
-<script src="vendor/qrcode.js?v=15a2"></script>
-<script src="app.js?v=15a2"></script>
+<script src="vendor/three.min.js?v=15diag1"></script>
+<script src="vendor/peerjs.min.js?v=15diag1"></script>
+<script src="vendor/qrcode.js?v=15diag1"></script>
+<script src="app.js?v=15diag1"></script>
 </body>
 </html>

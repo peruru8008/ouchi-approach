@@ -398,6 +398,9 @@ const DTL = (() => {
     let early = false, cand = null, scene = null, movedN = 0, calmN = 0, prevState = 'wait', clearT = null, lastSmall = null;
     let lastFeedTime=-Infinity,lastAttemptN=0;
     const S = () => opt();
+    const counts = Object.create(null);
+    const count = (key) => { counts[key]=(counts[key]||0)+1; };
+
     const roiBox = () => { const R = Math.max(10, Math.ceil(tee.r * 3)); return [Math.round(tee.x - R), Math.round(tee.y - R), 2 * R, 2 * R]; };
 
     // ---- タップしたボールを、その場で測ってすぐ「打ってOK」にする ----
@@ -532,15 +535,18 @@ const DTL = (() => {
       // 背景を覚えている範囲の中に切り詰める
       let x0 = Math.round(px - rad), y0 = Math.round(py - rad), x1 = Math.round(px + rad), y1 = Math.round(py + rad);
       if (ref) { x0 = Math.max(x0, ref.x); y0 = Math.max(y0, ref.y); x1 = Math.min(x1, ref.x + ref.w); y1 = Math.min(y1, ref.y + ref.h); }
-      if (x1 - x0 < 4 || y1 - y0 < 4) { lost++; return obs.length ? lost >= 5 : false; }
+      if (x1 - x0 < 4 || y1 - y0 < 4) { count('searchOutsideReference'); lost++; return obs.length ? lost >= 5 : false; }
       const cur = fr.roi(x0, y0, x1 - x0, y1 - y0);
       // 背景(打つ直前のコマ)の同じ範囲
       const bg = cropRef(cur.x, cur.y, cur.w, cur.h);
       let best = null;
+      count('searchFrames');
+      if (!bg) count('missingBackground');
       if (bg) {
         const m = closeOpen(diffMask(cur, bg, 55 / S().sens), cur.w, cur.h);
         const dExp = exp || 2 * r0;
         for (const b of blobs(m, cur.w, cur.h, Math.max(6, 0.12 * dExp * dExp))) {
+          count('candidates');
           // A blurred sphere sweeps an elongated shape: area is not its diameter.
           // Use the transverse second moment; lower confidence rather than treating
           // the long smear as extra depth evidence. This remains experimental.
@@ -551,22 +557,23 @@ const DTL = (() => {
           const elongation=Math.sqrt(major/minor),areaD=2*Math.sqrt(b.n/Math.PI);
           const d = Math.min(areaD,4*Math.sqrt(minor)), gx = b.x + cur.x, gy = b.y + cur.y;
           if (S().diagnostic) S().diagnostic({t,u:gx,v:gy,d,bw:b.bw,bh:b.bh,color:palDist(cur,b.px),expected:dExp,previous:obs.length});
-          if (d < 0.45 * dExp || d > 1.7 * dExp) continue;                     // 大きさが急に変わる物は別物
-          if (d > 1.25 * 2 * r0) continue;                                     // カメラから遠ざかるので、止まっていたときより大きくは写らない
-          if (elongation > 3.5) continue; // Still reject long shafts; accept modest ball blur.
-          if (!obs.length && gy > ball.y - 0.6 * r0) continue;                 // 1点目は止まっていた所より上
+          if (d < 0.45 * dExp || d > 1.7 * dExp) {count('rejectSizeChange');continue;}                     // 大きさが急に変わる物は別物
+          if (d > 1.25 * 2 * r0) {count('rejectLargerThanBall');continue;}                                     // カメラから遠ざかるので、止まっていたときより大きくは写らない
+          if (elongation > 3.5) {count('rejectElongation');continue;} // Still reject long shafts; accept modest ball blur.
+          if (!obs.length && gy > ball.y - 0.6 * r0) {count('rejectFirstPointHeight');continue;}                 // 1点目は止まっていた所より上
           // 後ろから見ると、ボールはほぼ真上へ上がっていく(左右は±35°以内)。横へ動くクラブを除く
-          if (!obs.length && Math.abs(gx - ball.x) > 2 * r0 + 0.7 * (ball.y - gy)) continue;
-          if (obs.length === 1 && gy > obs[0].v + 0.3 * r0) continue;          // 2点目も上へ
-          if (palDist(cur, b.px) > 110) continue;                              // ボールの色と合わない(クラブ・体)
+          if (!obs.length && Math.abs(gx - ball.x) > 2 * r0 + 0.7 * (ball.y - gy)) {count('rejectFirstPointSide');continue;}
+          if (obs.length === 1 && gy > obs[0].v + 0.3 * r0) {count('rejectSecondPointHeight');continue;}          // 2点目も上へ
+          if (palDist(cur, b.px) > 110) {count('rejectColor');continue;}                              // ボールの色と合わない(クラブ・体)
           const dd = Math.hypot(gx - px, gy - py);
           if (!best || dd < best.dd) best = { dd, u: gx, v: gy, d, wd:elongation>1.4?.35:1, elongation, px: b.px, R: cur };
         }
       }
       if (best) {
+        count('candidateFrames');
         const sa = seamAngle(best.R, best.px, pal);
         obs.push({ t, u: best.u, v: best.v, d: best.d, wd:best.wd, diameterWeight:best.wd, elongation:best.elongation, seam: sa }); exp = best.d; lost = 0;
-      } else lost++;
+      } else {count('noCandidateFrames');lost++;}
       const out = best && (best.u < 3 || best.v < 3 || best.u > fr.W - 4 || best.v > fr.H - 4);
       return obs.length >= (S().maxObs || 40) || (obs.length ? lost >= 5 : lost >= 10) || out || t - launchT > (S().maxT || 0.75);
     }
@@ -687,7 +694,8 @@ const DTL = (() => {
           const directionCos=(dx1*dx2+up1*up2)/Math.max(1e-6,Math.hypot(dx1,up1)*Math.hypot(dx2,up2));
           // A shaft sweeping across the scene can rise in three frames, but does
           // not form a consistent outgoing ball direction.
-          if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 2.5 && consistent && receding && directionCos>.8) { state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
+          if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 2.5 && consistent && receding && directionCos>.8) { count('confirmedTracks');state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
+          count('rejectThreePointConfirmation');
           obs = []; lost = 0; exp = 2 * ball.r;
         }
         // The first missed shot may have no empty-floor reference yet. Going
@@ -853,6 +861,7 @@ const DTL = (() => {
     }
     return {
       feed, tap, tapReady, useStored,
+      get diagnostics() { return {...counts}; },
       reset() { state = tee ? 'clear' : 'setup'; quiet = 0; },
       get state() { return state; }, get tee() { return tee; }, get ball() { return ball; }, get obs() { return obs; },
       get cand() { return state === 'wait' ? cand : null; }, get progress() { return state === 'wait' ? Math.min(1, stable / READY_FRAMES) : state === 'ready' || state === 'armed' ? 1 : 0; },
@@ -1057,13 +1066,15 @@ const Cam = (() => {
   const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
   let lastShot = null;
   let frameClock=FrameClock.create(),generation=0,callbackId=null,callbackKind=null;
-  const diagnostic={version:'15-alpha2',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
+  const diagnostic={version:'15-diagnostic1',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
   function record(kind,data){diagnostic.events.push({kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null,...data});if(diagnostic.events.length>250)diagnostic.events.shift();}
-  $('exportDiagnostics').onclick=()=>{
-    const copy={...diagnostic,frameClock:{...frameClock.stats},settings:{...S},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
+  function exportDiagnostics(){
+    const copy={...diagnostic,tracker:sess?sess.diagnostics:null,registration:sess?{tee:sess.tee,ball:sess.ball}:null,frameClock:{...frameClock.stats},settings:{...S,fpx:store.get(fKey(),null)},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
     const url=URL.createObjectURL(new Blob([JSON.stringify(copy,null,2)],{type:'application/json'}));
     const a=document.createElement('a');a.href=url;a.download='ouchi-diagnostics-'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   };
+  $('exportDiagnostics').onclick=exportDiagnostics;
+  $('markMiss').onclick=()=>{record('user-reported-miss',{state:sess?.state,tracker:sess?.diagnostics||{},frames:diagnostic.frames,clock:{...frameClock.stats}});exportDiagnostics();};
   // Remove legacy image-derived thumbnails without reading or exporting their contents.
   try{for(let i=localStorage.length-1;i>=0;i--){const k=localStorage.key(i);if(k&&k.startsWith('oa_tee_'))localStorage.removeItem(k);}}catch(e){}
 
@@ -1258,8 +1269,10 @@ const Cam = (() => {
     if (!running || role !== 'camera') return;
     showTilt();
     const f=ftimes.length>1?(ftimes.length-1)/(ftimes[ftimes.length-1]-ftimes[0]):0;
+    const age=frameClock.latest?performance.now()-frameClock.latest.receivedAt:Infinity;
+    const health=age>2000?'映像の処理が止まっています。診断記録を保存してください。':null;
     const phase={setup:'初回登録待ち',ready:'ボール待機',armed:'球の移動を確認中',track:'飛行球を追跡中',after:'次の球の準備中',wait:'次の球を自動検出中',moved:'カメラ移動の確認中'};
-    $('liveDiagnostic').textContent=`映像処理 ${Math.round(f)}fps ・ ${phase[sess?.state]||sess?.state||'開始中'} ・ 追跡 ${sess?.obs.length||0}点`;
+    $('liveDiagnostic').textContent=health||`映像処理 ${Math.round(f)}fps ・ ${phase[sess?.state]||sess?.state||'開始中'} ・ 追跡 ${sess?.obs.length||0}点`;
     diagnostic.health={state:sess?.state,frames:diagnostic.frames,fps:Math.round(f),observations:sess?.obs.length||0};
     if (state === 'ready' || state === 'adjust') pushStatus(true);
   }, 1000);
@@ -1326,6 +1339,8 @@ const Cam = (() => {
     } else if (ball && (ss === 'ready' || ss === 'armed')) {
       // 打ってOK:緑の丸が脈打つ。構えでボールが隠れている間はオレンジ
       const rad = ball.r * sx + (6 + 3 * pulse) * dpr;
+      ring(ball.x,ball.y,ball.r*sx,'#ffffff',1,[3,3]);
+      octx.fillStyle='#ffffff';octx.beginPath();octx.arc(X(ball.x),Y(ball.y),2*dpr,0,2*Math.PI);octx.fill();
       ring(ball.x, ball.y, rad, ss === 'armed' ? '#f0a020' : '#1f9d55', ss === 'armed' ? 3 : 4 + 2 * pulse);
     } else if (tee && tee.r && (ss === 'wait' || ss === 'clear' || ss === 'after' || ss === 'moved')) {
       // ボール待ち:置き場所を点線の丸で示す
@@ -1346,7 +1361,9 @@ const Cam = (() => {
     if (vid.videoWidth !== VW || vid.videoHeight !== VH) { VW = vid.videoWidth; VH = vid.videoHeight; newSession(); }
     if (performance.now() < cooldownUntil && sess.state !== 'track') { drawOverlay(); return; }
     if (state === 'done' || state === 'error') setState(sess.state === 'ready' ? 'ready' : 'wait');
+    const before=sess.state;
     const ev = sess.feed(frameObj, t);
+    if(before!==sess.state)record('transition',{from:before,to:sess.state,tracker:sess.diagnostics});
     if (ev) {
       record(ev.ev,{state:sess.state,n:sess.obs.length}); // Never persist pixel-derived thumbnails.
       if (ev.ev === 'teeset') toast('置き場所を覚えました');
