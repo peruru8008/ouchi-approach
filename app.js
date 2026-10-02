@@ -1066,7 +1066,7 @@ const Cam = (() => {
   const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
   let lastShot = null;
   let frameClock=FrameClock.create(),generation=0,callbackId=null,callbackKind=null;
-  const diagnostic={version:'15-diagnostic1',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
+  const diagnostic={version:'15-diagnostic2',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
   function record(kind,data){diagnostic.events.push({kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null,...data});if(diagnostic.events.length>250)diagnostic.events.shift();}
   function exportDiagnostics(){
     const copy={...diagnostic,tracker:sess?sess.diagnostics:null,registration:sess?{tee:sess.tee,ball:sess.ball}:null,frameClock:{...frameClock.stats},settings:{...S,fpx:store.get(fKey(),null)},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};

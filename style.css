@@ -281,3 +281,19 @@ table.log td.n{white-space:nowrap}
 .lie button{flex:1;border:1px solid var(--rule);background:#fff;border-radius:8px;padding:8px 6px;font:inherit;font-weight:700;color:var(--ink2)}
 .lie button[aria-pressed="true"]{background:var(--ink);color:#fff;border-color:var(--ink)}
 .ver{display:inline-block;margin-left:6px;opacity:.6;font-size:12px}
+
+/* D2: the diagnostic action is always available in the camera view. */
+.test-banner{background:#fff0ba;color:#513800;border:2px solid #c79216;border-radius:10px;padding:10px 14px;display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px}
+.test-banner strong{font-size:20px}.test-banner span{font-size:12px}
+#camView{padding-bottom:145px;gap:10px}
+#camView .statuscard{padding:12px 14px}
+#camView .statuscard b{font-size:22px}
+#camView .stage{height:min(38svh,420px);min-height:160px;aspect-ratio:auto!important;width:100%}
+.capture-status{font-size:13px;font-weight:700;margin:0;padding:8px 10px;background:#e8eef6;border-radius:6px;color:#263b55}
+.setup-guide h2{font-size:17px;margin:12px 0 6px}.setup-guide h2:first-child{margin-top:0}
+.setup-guide p{font-size:14px;margin:6px 0}.setup-guide .placement-line{padding:12px 8px;border-radius:6px;background:#eef2f6;text-align:center;font-size:15px}
+.diagnostic-dock{position:fixed;bottom:0;left:0;right:0;z-index:35;display:flex;gap:8px;align-items:stretch;padding:10px max(12px,env(safe-area-inset-left)) calc(10px + env(safe-area-inset-bottom));background:#fff;border-top:2px solid #d4dce3;box-shadow:0 -4px 18px #0002}
+.diagnostic-dock .miss-button{flex:1;background:#a82420;color:#fff;border-color:#a82420;display:block;font-size:17px;line-height:1.4;padding:10px}
+.miss-button small{font-size:12px;font-weight:400}.diagnostic-dock>.btn:last-child{font-size:13px;padding:8px}
+@media(min-width:700px){.diagnostic-dock{left:50%;right:auto;transform:translateX(-50%);width:min(640px,100%);border-radius:12px 12px 0 0}}
+@media(max-width:380px){.test-banner{align-items:flex-start;flex-direction:column}.diagnostic-dock .miss-button{font-size:15px}}
