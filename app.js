@@ -396,7 +396,7 @@ const DTL = (() => {
     let ball = null, pal = null, seam0 = null, ref = null, refBox = null, readyRoi = null, launchT = 0;
     let obs = [], lost = 0, lastSeen = null, exp = null, quiet = 0, removeSeen = false, armT = 0, back = 0;
     let early = false, cand = null, scene = null, movedN = 0, calmN = 0, prevState = 'wait', clearT = null, lastSmall = null;
-    let lastFeedTime=-Infinity,lastAttemptN=0;
+    let lastFeedTime=-Infinity,lastAttemptN=0,restSince=null,lastRestCheck=-Infinity;
     const S = () => opt();
     const counts = Object.create(null);
     const count = (key) => { counts[key]=(counts[key]||0)+1; };
@@ -410,12 +410,12 @@ const DTL = (() => {
       const { d, w, h } = R, cx0 = x - R.x, cy0 = y - R.y;
       const px = (X, Y, c) => { X = Math.max(0, Math.min(w - 1, X)); Y = Math.max(0, Math.min(h - 1, Y)); const x0 = Math.floor(X), y0 = Math.floor(Y), fx = X - x0, fy = Y - y0, x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
         const g = (xx, yy) => d[(yy * w + xx) * 4 + c]; return (g(x0, y0) * (1 - fx) + g(x1, y0) * fx) * (1 - fy) + (g(x0, y1) * (1 - fx) + g(x1, y1) * fx) * fy; };
-      const edge = (cx, cy, r) => { let s = 0; for (let a = 0; a < 40; a++) { const t = a / 40 * 2 * Math.PI, c = Math.cos(t), sn = Math.sin(t); let e = 0; for (let ch = 0; ch < 3; ch++) { const ro = r + Math.max(1.5, 0.18 * r), ri = r - Math.max(1.5, 0.18 * r); e += Math.abs(px(cx + c * ro, cy + sn * ro, ch) - px(cx + c * ri, cy + sn * ri, ch)); } s += Math.min(e, 200); } return s / 40; };
+      const edge = (cx, cy, r) => { let s = 0; for (let a = 0; a < 24; a++) { const t = a / 24 * 2 * Math.PI, c = Math.cos(t), sn = Math.sin(t); let e = 0; for (let ch = 0; ch < 3; ch++) { const ro = r + Math.max(1.5, 0.18 * r), ri = r - Math.max(1.5, 0.18 * r); e += Math.abs(px(cx + c * ro, cy + sn * ro, ch) - px(cx + c * ri, cy + sn * ri, ch)); } s += Math.min(e, 200); } return s / 24; };
       const rMin = Math.max(4, rLo || 5), rMax = Math.min(Math.max(8, big * 0.85), rHi || 1e9);
       let best = null; const perR = [];
       for (let r = rMin; r <= rMax; r *= 1.08) {
         let bR = null;
-        const st = Math.max(1, r / 4);
+        const st = Math.max(1, r / 2);
         for (let dy = -r * 0.9; dy <= r * 0.9; dy += st) for (let dx = -r * 0.9; dx <= r * 0.9; dx += st) {
           const cx = cx0 + dx, cy = cy0 + dy; if (Math.hypot(dx, dy) > r * 0.9) continue;
           let sc = edge(cx, cy, r);
@@ -429,7 +429,7 @@ const DTL = (() => {
       const top = Math.max(...perR.map(q => q.sc));
       for (const q of perR) if (q.sc >= 0.92 * top && (!best || q.r > best.r)) best = q;
       // 細かく詰める
-      for (let it = 0; it < 2; it++) { let b2 = best; for (const [dx, dy, dr] of [[0.5,0,0],[-0.5,0,0],[0,0.5,0],[0,-0.5,0],[0,0,0.5],[0,0,-0.5]]) { const sc = edge(best.cx + dx, best.cy + dy, best.r + dr); if (sc > b2.sc) b2 = { cx: best.cx + dx, cy: best.cy + dy, r: best.r + dr, sc }; } best = b2; }
+      for (let it = 0; it < 4; it++) { let b2 = best; for (const [dx, dy, dr] of [[0.5,0,0],[-0.5,0,0],[0,0.5,0],[0,-0.5,0],[0,0,0.5],[0,0,-0.5]]) { const sc = edge(best.cx + dx, best.cy + dy, best.r + dr); if (sc > b2.sc) b2 = { cx: best.cx + dx, cy: best.cy + dy, r: best.r + dr, sc }; } best = b2; }
       return { x: best.cx + R.x, y: best.cy + R.y, r: best.r, score: best.sc };
     }
     // ボールの境目は縦にまっすぐ置く前提:タップした側の半球は「縦に直径ぶんの高さ、横に半径ぶんの幅」の半円に写る。
@@ -484,6 +484,24 @@ const DTL = (() => {
       if (fr.small) scene = fr.small(); movedN = 0;
       if (empty && (empty.w !== cur.w || empty.h !== cur.h)) empty = null;     // 置き場所の大きさが変わったら背景を覚え直す
       return { ev: 'ready', ball: Object.assign({}, ball), tee: Object.assign({}, tee), issue: placeIssue(fr) };
+    }
+    // Reacquire a stationary ball from its outline and registered colors.
+    // This does not require seeing an empty floor between two shots.
+    function restingBall(fr, ts, t) {
+      if(!ts.still){restSince=null;return null;}
+      if(restSince===null)restSince=t;
+      if(t-restSince<.3 || t-lastRestCheck<.3 || !ball || !pal)return null;
+      lastRestCheck=t;count('restingSearches');
+      const b=measureAt(fr,tee.x,tee.y,tee.r,.75*tee.r,1.25*tee.r);
+      if(!b || b.score<60 || Math.hypot(b.x-tee.x,b.y-tee.y)>tee.r)return null;
+      const R=fr.roi(Math.floor(b.x-b.r),Math.floor(b.y-b.r),Math.ceil(2*b.r+1),Math.ceil(2*b.r+1));
+      const px=[];
+      for(let y=0;y<R.h;y++)for(let x=0;x<R.w;x++)if(Math.hypot(x+R.x-b.x,y+R.y-b.y)<b.r*.8)px.push(y*R.w+x);
+      if(palDist(R,px)>80)return null;
+      count('restingMatches');
+      ball={x:b.x,y:b.y,r:b.r};readyRoi=ts.cur;grabRef(fr);
+      state='ready';quiet=0;stable=0;obs=[];lost=0;exp=2*b.r;early=false;restSince=null;
+      return {ev:'ready',ball:{...ball},issue:placeIssue(fr)};
     }
     // ---- (旧)置き場所の登録:ボールをタップ → ボールがなくなって落ち着いたら背景を覚える ----
     function tap(fr, x, y) {
@@ -626,6 +644,9 @@ const DTL = (() => {
       }
       if (state === 'moved') return null;
       const ts = teeState(fr);
+      if(state==='wait'||state==='after'||(state==='armed' && t-armT>.5 && !obs.length)){
+        const returned=restingBall(fr,ts,t);if(returned)return returned;
+      }else restSince=null;
       if (state === 'clear' && clearT == null) clearT = t;
       if (state === 'clear' && t - clearT > 4) { state = 'setup'; tee = null; return { ev: 'retap' }; }   // 前に覚えた置き場所と違う
       if (state === 'remove' || state === 'clear' || state === 'after') {
@@ -702,7 +723,8 @@ const DTL = (() => {
         // straight to wait makes teeState.present permanently false. Recover
         // through after, which captures the empty floor or recognises the
         // returned ball, without another tap.
-        if (t - armT > 12) { state = 'after'; stable = 0; quiet = 0; obs = []; lost = 0; exp = 2 * ball.r; return { ev: 'lostball' }; }
+        // Keep the registered shot armed while the club hides the ball.
+        // A returned resting ball can rearm above even after an untracked shot.
         return null;
       }
       if (state === 'ready') {
@@ -1066,7 +1088,7 @@ const Cam = (() => {
   const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
   let lastShot = null;
   let frameClock=FrameClock.create(),generation=0,callbackId=null,callbackKind=null;
-  const diagnostic={version:'15-diagnostic2',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
+  const diagnostic={version:'15-D3',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
   function record(kind,data){diagnostic.events.push({kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null,...data});if(diagnostic.events.length>250)diagnostic.events.shift();}
   function exportDiagnostics(){
     const copy={...diagnostic,tracker:sess?sess.diagnostics:null,registration:sess?{tee:sess.tee,ball:sess.ball}:null,frameClock:{...frameClock.stats},settings:{...S,fpx:store.get(fKey(),null)},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
@@ -1145,7 +1167,7 @@ const Cam = (() => {
     clear: ['置き場所を確認中', 'ボールがない状態で少し待ってください'],
     wait: ['次のボールを自動で探しています', '最初と同じ場所に置き、手とクラブを少し離してください。タップは不要です'],
     ready: ['打ってOK', ''],
-    armed: ['球の移動を確認中', 'クラブで球が隠れている場合はそのまま打てます。飛行球を確認できたら計測します'],
+    armed: ['打ってOK', '球の登録を保持しています。クラブで隠れていても、そのまま打てます'],
     track: ['計測中…', ''],
     done: ['計測しました', 'iPadを見てください'],
     error: ['もう一度どうぞ', '']
@@ -1159,7 +1181,7 @@ const Cam = (() => {
   function setState(s, sub) {
     state = s;
     const t = s === 'adjust' ? ISSUE[issue] : (TEXT[s] || ['', '']);
-    $('camStatus').dataset.state = s === 'adjust' || s === 'moved' ? 'error' : s === 'setup' || s === 'remove' || s === 'clear' ? 'tap' : s;
+    $('camStatus').dataset.state = s === 'armed' ? 'ready' : s === 'adjust' || s === 'moved' ? 'error' : s === 'setup' || s === 'remove' || s === 'clear' ? 'tap' : s;
     $('stateText').textContent = t[0];
     $('stateSub').textContent = sub || (s === 'ready' && infoLine()) || t[1];
     pushStatus();
@@ -1290,8 +1312,9 @@ const Cam = (() => {
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
+    const tapStart=performance.now();
     const ev = sess.tapReady(frameObj, nx * VW, ny * VH, frameClock.latest ? frameClock.latest.time : 0);
-    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball}); issue = VW > VH ? 'landscape' : ev.issue || null; setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
+    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball,processingMs:performance.now()-tapStart}); issue = VW > VH ? 'landscape' : ev.issue || null; setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
     else toast('ボールが見つかりませんでした。ボールの真ん中をタップしてください');
   });
 
@@ -1341,7 +1364,7 @@ const Cam = (() => {
       const rad = ball.r * sx + (6 + 3 * pulse) * dpr;
       ring(ball.x,ball.y,ball.r*sx,'#ffffff',1,[3,3]);
       octx.fillStyle='#ffffff';octx.beginPath();octx.arc(X(ball.x),Y(ball.y),2*dpr,0,2*Math.PI);octx.fill();
-      ring(ball.x, ball.y, rad, ss === 'armed' ? '#f0a020' : '#1f9d55', ss === 'armed' ? 3 : 4 + 2 * pulse);
+      ring(ball.x, ball.y, rad, '#1f9d55', ss === 'armed' ? 3 : 4 + 2 * pulse);
     } else if (tee && tee.r && (ss === 'wait' || ss === 'clear' || ss === 'after' || ss === 'moved')) {
       // ボール待ち:置き場所を点線の丸で示す
       ring(tee.x, tee.y, tee.r * sx + 6 * dpr, ss === 'moved' ? '#d63a2a' : 'rgba(255,255,255,.85)', 2.5, [6, 5]);
@@ -1796,13 +1819,13 @@ const App = (() => {
       onShot(s);
     }
   }
-  const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: '同じ場所に次の球を置いてください（自動認識）', ready: '打ってOK', armed: '球の移動を確認中', track: '計測中…' };
+  const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: '同じ場所に次の球を置いてください（自動認識）', ready: '打ってOK', armed: '打ってOK（球の登録を保持中）', track: '計測中…' };
   const ADJUST_TEXT = { portrait: 'iPhoneを縦向きにしてください', near: 'カメラが近すぎます。距離設定と置き方を確認してください', far: 'カメラが遠すぎます。少し近づけてください' };
   function setReady(s, iss) {
     const was = readyState; readyState = s;
-    $('readyMark').dataset.state = s; $('world').dataset.ready = s;
+    $('readyMark').dataset.state = s==='armed'?'ready':s; $('world').dataset.ready = s==='armed'?'ready':s;
     $('readyText').textContent = s === 'adjust' ? (ADJUST_TEXT[iss] || ADJUST_TEXT.near) : READY_TEXT[s] || '';
-    if (s === 'ready' && was !== 'ready') Sound.ready();
+    if (s === 'ready' && was !== 'ready' && was !== 'armed') Sound.ready();
   }
   function sendInfo() { Net.send({ type: 'info', next: '', lie }); }
   $('soundOn').checked = Sound.on(); $('soundOn').onchange = () => store.set('sound', $('soundOn').checked);

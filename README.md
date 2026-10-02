@@ -1,3 +1,3 @@
-# 計測の検証用 D2
+# 検証用 D3
 
-DIAGNOSTIC.txt に更新・配置・確認手順があります。画面上部の黄色いD2表示と、iPhone画面下の赤い記録ボタンが目印です。
+最新の変更・限界・手順はD3.txtを参照してください。DIAGNOSTIC.txtおよびCHANGES-alpha2.txtは旧版の資料です。
