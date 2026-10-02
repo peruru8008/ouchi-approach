@@ -396,6 +396,7 @@ const DTL = (() => {
     let ball = null, pal = null, seam0 = null, ref = null, refBox = null, readyRoi = null, launchT = 0;
     let obs = [], lost = 0, lastSeen = null, exp = null, quiet = 0, removeSeen = false, armT = 0, back = 0;
     let early = false, cand = null, scene = null, movedN = 0, calmN = 0, prevState = 'wait', clearT = null, lastSmall = null;
+    let lastFeedTime=-Infinity,lastAttemptN=0;
     const S = () => opt();
     const roiBox = () => { const R = Math.max(10, Math.ceil(tee.r * 3)); return [Math.round(tee.x - R), Math.round(tee.y - R), 2 * R, 2 * R]; };
 
@@ -476,6 +477,7 @@ const DTL = (() => {
       const bm = new Uint8Array(cur.w * cur.h); for (const k of px) bm[k] = 1;
       pal = palette(cur, bm); seam0 = seamAngle(cur, px, pal);
       readyRoi = cur; prevIn = null; grabRef(fr); state = 'ready'; quiet = 0; stable = 0; launchT = t || 0;
+      obs = []; lost = 0; exp = 2 * ball.r; early = false;
       if (fr.small) scene = fr.small(); movedN = 0;
       if (empty && (empty.w !== cur.w || empty.h !== cur.h)) empty = null;     // 置き場所の大きさが変わったら背景を覚え直す
       return { ev: 'ready', ball: Object.assign({}, ball), tee: Object.assign({}, tee), issue: placeIssue(fr) };
@@ -539,22 +541,31 @@ const DTL = (() => {
         const m = closeOpen(diffMask(cur, bg, 55 / S().sens), cur.w, cur.h);
         const dExp = exp || 2 * r0;
         for (const b of blobs(m, cur.w, cur.h, Math.max(6, 0.12 * dExp * dExp))) {
-          const d = 2 * Math.sqrt(b.n / Math.PI), gx = b.x + cur.x, gy = b.y + cur.y;
+          // A blurred sphere sweeps an elongated shape: area is not its diameter.
+          // Use the transverse second moment; lower confidence rather than treating
+          // the long smear as extra depth evidence. This remains experimental.
+          let xx=0,xy=0,yy=0;
+          for(const k of b.px){const dx=k%cur.w-b.x,dy=Math.floor(k/cur.w)-b.y;xx+=dx*dx;xy+=dx*dy;yy+=dy*dy;}
+          xx/=b.n;xy/=b.n;yy/=b.n;
+          const disc=Math.hypot(xx-yy,2*xy),minor=Math.max(.25,(xx+yy-disc)/2),major=Math.max(minor,(xx+yy+disc)/2);
+          const elongation=Math.sqrt(major/minor),areaD=2*Math.sqrt(b.n/Math.PI);
+          const d = Math.min(areaD,4*Math.sqrt(minor)), gx = b.x + cur.x, gy = b.y + cur.y;
+          if (S().diagnostic) S().diagnostic({t,u:gx,v:gy,d,bw:b.bw,bh:b.bh,color:palDist(cur,b.px),expected:dExp,previous:obs.length});
           if (d < 0.45 * dExp || d > 1.7 * dExp) continue;                     // 大きさが急に変わる物は別物
           if (d > 1.25 * 2 * r0) continue;                                     // カメラから遠ざかるので、止まっていたときより大きくは写らない
-          if (b.bw > 1.8 * b.bh + 2 || b.bh > 1.8 * b.bw + 2) continue;         // 細長い物(シャフト・クラブのぶれ)
+          if (elongation > 3.5) continue; // Still reject long shafts; accept modest ball blur.
           if (!obs.length && gy > ball.y - 0.6 * r0) continue;                 // 1点目は止まっていた所より上
           // 後ろから見ると、ボールはほぼ真上へ上がっていく(左右は±35°以内)。横へ動くクラブを除く
           if (!obs.length && Math.abs(gx - ball.x) > 2 * r0 + 0.7 * (ball.y - gy)) continue;
           if (obs.length === 1 && gy > obs[0].v + 0.3 * r0) continue;          // 2点目も上へ
           if (palDist(cur, b.px) > 110) continue;                              // ボールの色と合わない(クラブ・体)
           const dd = Math.hypot(gx - px, gy - py);
-          if (!best || dd < best.dd) best = { dd, u: gx, v: gy, d, px: b.px, R: cur };
+          if (!best || dd < best.dd) best = { dd, u: gx, v: gy, d, wd:elongation>1.4?.35:1, elongation, px: b.px, R: cur };
         }
       }
       if (best) {
         const sa = seamAngle(best.R, best.px, pal);
-        obs.push({ t, u: best.u, v: best.v, d: best.d, seam: sa }); exp = best.d; lost = 0;
+        obs.push({ t, u: best.u, v: best.v, d: best.d, wd:best.wd, diameterWeight:best.wd, elongation:best.elongation, seam: sa }); exp = best.d; lost = 0;
       } else lost++;
       const out = best && (best.u < 3 || best.v < 3 || best.u > fr.W - 4 || best.v > fr.H - 4);
       return obs.length >= (S().maxObs || 40) || (obs.length ? lost >= 5 : lost >= 10) || out || t - launchT > (S().maxT || 0.75);
@@ -577,13 +588,14 @@ const DTL = (() => {
 
     // ---- 1コマ分 ----
     function feed(fr, t) {
+      if(!Number.isFinite(t)||t<=lastFeedTime)return null;lastFeedTime=t;
       fN++;
       if (state === 'setup') return null;
       if (state === 'track') {
         if (obs.length && t - obs[obs.length - 1].t < 0.002) return null;
         const done = trackStep(fr, t);
         // 14コマ(約0.25秒)追えたら、すぐ結果を出す。そのあとも追い続けて、終わったら空気抵抗の合わせ込みに使う
-        if (!early && obs.length >= 14 && !done) { early = true; const r = solve(fr, true); if (r.ok) return { ev: 'result', res: r }; early = 'failed'; }
+        if (early !== true && obs.length >= 14 && obs.length >= lastAttemptN+4 && !done) { lastAttemptN=obs.length; const r = solve(fr, true); if (r.ok) {early=true;return { ev: 'result', res: r };} early = 'failed'; }
         if (done) { state = 'after'; quiet = 0; const r = solve(fr); const e0 = early; early = false; return e0 === true ? { ev: 'calib', res: r } : { ev: 'result', res: r }; }
         return null;
         return null;
@@ -658,17 +670,25 @@ const DTL = (() => {
       }
       if (state === 'armed') {
         // クラブが前に来てボールが隠れている(構え)か、打ったあと。飛んでいくボールが見つかれば追跡、ボールがまた見えれば元に戻る
-        if (teeChanged(ts.cur) < 0.15) { if (++back >= 3) { state = 'ready'; back = 0; } return null; }
+        if (teeChanged(ts.cur) < 0.15) { if (++back >= 3) { state = 'ready'; back = 0; obs = []; lost = 0; exp = 2 * ball.r; } return null; }
         back = 0;
         if (obs.length && t - obs[obs.length - 1].t < 0.002) return null;     // 同じコマが重複して届いた
         trackStep(fr, t);
-        if (obs.length && lost >= 2) { obs = []; lost = 0; }                   // 続かなかった:クラブなど
+        if (obs.length && lost >= 2) { obs = []; lost = 0; exp = 2 * ball.r; } // Reset size with a rejected trajectory, not just positions.
         if (obs.length >= 3) {
-          early = false;
+          early = false; lastAttemptN=0;
           // 3点とも上へ進み、大きさがそろっていればボール
           const [a0, a1, a2] = obs, up1 = a0.v - a1.v, up2 = a1.v - a2.v, ds = Math.max(a0.d, a1.d, a2.d) / Math.min(a0.d, a1.d, a2.d);
-          if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 1.4) { state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
-          obs = []; lost = 0;
+          const dt=a2.t-a0.t, fraction=(a1.t-a0.t)/dt;
+          const inversePred=(1-fraction)/a0.d+fraction/a2.d;
+          const consistent=dt>0 && dt<.25 && Math.abs(1/a1.d-inversePred)*a1.d<.2;
+          const receding=a1.d<a0.d*1.15 && a2.d<a1.d*1.15;
+          const dx1=a1.u-a0.u,dx2=a2.u-a1.u;
+          const directionCos=(dx1*dx2+up1*up2)/Math.max(1e-6,Math.hypot(dx1,up1)*Math.hypot(dx2,up2));
+          // A shaft sweeping across the scene can rise in three frames, but does
+          // not form a consistent outgoing ball direction.
+          if (up1 > 0.25 * ball.r && up2 > 0.1 * ball.r && ds < 2.5 && consistent && receding && directionCos>.8) { state = 'track'; launchT = obs[0].t; lost = 0; return { ev: 'track' }; }
+          obs = []; lost = 0; exp = 2 * ball.r;
         }
         if (t - armT > 12) { state = 'wait'; stable = 0; return { ev: 'lostball' }; }
         return null;
@@ -779,9 +799,8 @@ const DTL = (() => {
         const sgn = rt[0] >= 0 ? 1 : -1;
         return { speed: sp, angle: Math.atan2(vu, Math.hypot(vf, vr)) * 180 / Math.PI, dir: Math.atan2(sgn * vr, vf) * 180 / Math.PI };
       };
-      // 境目の傾き → 回転軸の傾き
-      let axis = 0, axisN = 0;
-      if (seam0 != null) { let s = 0, c = 0; for (const q of obs) if (q.seam != null && q.d >= Math.max(14, 1.1 * ball.r)) { const d = q.seam - seam0; s += Math.sin(d); c += Math.cos(d); axisN++; } if (axisN >= 5 && Math.abs(Math.cos(seam0)) > 0.85) { const a = Math.atan2(s, c), R = Math.hypot(s, c) / axisN; if (R > 0.8) axis = clamp(a, -0.35, 0.35); } }
+      // A visible color seam does not establish the rotation axis.
+      const axis = 0;
       for (let pass = 0; pass < 3; pass++) {
         fit = lm(p, (q) => resid(q, use, spin, axis, 1), 25); p = fit.p;
         const L = launchOf(p); spin = PHYS.plasticLaunch(L.speed, Math.max(1, L.angle), { massG: o.massG, diamMM: o.diamMM, cor: o.cor, attack: o.attack }).spin;
@@ -790,11 +809,12 @@ const DTL = (() => {
         const ep = use.map((q, i) => Math.hypot(rr[3 * i], rr[3 * i + 1])), ed = use.map((q, i) => Math.abs(rr[3 * i + 2]));
         const med = (a) => { const b = a.slice().sort((x, y) => x - y); return b[b.length >> 1] || 1; };
         const mp = Math.max(0.7, med(ep)), md = Math.max(0.7, med(ed));
-        use.forEach((q, i) => { q.w = ep[i] > 3 * mp ? 3 * mp / ep[i] : 1; if (q.wd !== 0) q.wd = ed[i] > 3 * md ? 3 * md / ed[i] : 1; });
+        use.forEach((q, i) => { q.w = ep[i] > 3 * mp ? 3 * mp / ep[i] : 1; if (q.wd !== 0) q.wd = (q.diameterWeight || 1) * (ed[i] > 3 * md ? 3 * md / ed[i] : 1); });
       }
       fit = { p, rms: Math.sqrt(resid(p, use, spin, axis, 1).reduce((a, v) => a + v * v, 0) / (3 * use.length)) };
       const L = launchOf(p);
-      Object.assign(res, { ok: true, speed: L.speed, angle: L.angle, dir: L.dir, spin, axis: axis * 180 / Math.PI, rms: fit.rms, impactT: p[0], f, launchT });
+      if (![L.speed,L.angle,L.dir,spin,fit.rms,p[0]].every(Number.isFinite)) {res.ok=false;res.why='odd';return res;}
+      Object.assign(res, { ok: true, speed: L.speed, angle: L.angle, dir: L.dir, spin, axis: axis * 180 / Math.PI, rms: fit.rms, impactT: p[0], f, launchT, velocity:p.slice(1), axisSource:'assumed-zero' });
       // 前半だけ・後半だけで当てはめても同じ速さになるか(ならなければ、別の物を追ったか大きさが乱れている)
       if (use.length >= 10) {
         const h1 = use.slice(0, Math.ceil(use.length * 0.7)), h2 = use.slice(Math.floor(use.length * 0.3));
@@ -817,11 +837,11 @@ const DTL = (() => {
           const pd = lm(p, (q) => resid(q, all, spin, axis, ds), 8);
           if (!best || pd.rms < best.rms) best = { ds, rms: pd.rms, p: pd.p };
         }
-        res.dragFit = best.ds; res.dragRms = best.rms;
+        res.dragFit = best.ds; res.dragAbsolute=prof.cdScale*best.ds; res.dragRms = best.rms;
         const L2 = launchOf(best.p);
-        if (best.rms < Math.max(4, 0.5 * ball.r) && L2.speed > 0.8 && L2.speed < 15) {
+        if (best.rms < Math.max(4, 0.5 * ball.r) && L2.speed > 0.8 && L2.speed < 15 && L2.angle>2 && L2.angle<80 && Math.abs(L2.dir)<30) {
           res.short = { speed: res.speed, angle: res.angle, dir: res.dir };
-          Object.assign(res, { speed: L2.speed, angle: L2.angle, dir: L2.dir, impactT: best.p[0], long: true });
+          Object.assign(res, { speed: L2.speed, angle: L2.angle, dir: L2.dir, impactT: best.p[0], velocity: best.p.slice(1), long: true });
           res.spin = PHYS.plasticLaunch(L2.speed, Math.max(1, L2.angle), { massG: o.massG, diamMM: o.diamMM, cor: o.cor, attack: o.attack }).spin;
         }
       }
@@ -836,6 +856,36 @@ const DTL = (() => {
     };
   }
   return { session, findCircle };
+})();
+
+// Frame identity and elapsed video time are distinct from wall-clock processing time.
+const FrameClock = (() => {
+  function create() {
+    let mode=null,lastTime=null,lastIdentity=null,origin=null,latest=null;
+    const stats={callbacks:0,accepted:0,duplicates:0,invalid:0,missed:0,mode:null};
+    function next(now, meta, currentTime) {
+      stats.callbacks++;
+      const m=meta||{};
+      const identity=Number.isFinite(m.presentedFrames)?m.presentedFrames:null;
+      if(identity!==null && lastIdentity!==null && identity<=lastIdentity){stats.duplicates++;return null;}
+      if(!mode){
+        mode=Number.isFinite(m.captureTime)?'capture':Number.isFinite(m.mediaTime)&&m.mediaTime>0?'media':meta?'presentation':'currentTime';
+        stats.mode=mode;
+      }
+      const t=mode==='capture'?m.captureTime/1000:mode==='media'?m.mediaTime:mode==='presentation'?m.presentationTime/1000:currentTime;
+      // Never silently switch clocks in a recording session.
+      if(!Number.isFinite(t) || t<0){stats.invalid++;return null;}
+      if(lastTime!==null && t<=lastTime){stats.duplicates++;return null;}
+      if(identity!==null && lastIdentity!==null)stats.missed+=Math.max(0,identity-lastIdentity-1);
+      if(origin===null)origin=t;
+      lastTime=t;if(identity!==null)lastIdentity=identity;
+      stats.accepted++;
+      latest={time:t-origin,receivedAt:now,identity,timingQuality:mode==='capture'?'capture':mode==='media'?'media':'presentation-only'};
+      return latest;
+    }
+    return {next,stats,get latest(){return latest;}};
+  }
+  return {create};
 })();
 
 
@@ -1004,6 +1054,17 @@ const Cam = (() => {
   const IDLE_DARK = 20000, IDLE_STOP = 10 * 60000;
   const S = { dist: store.get('dist', 1.8), diam: store.get('diam', 42), mass: store.get('mass', 5), cor: store.get('cor', 0.55), attack: store.get('attack', -3), sens: store.get('sens', 1), drag: store.get('drag', 1) };
   let lastShot = null;
+  let frameClock=FrameClock.create(),generation=0,callbackId=null,callbackKind=null;
+  const diagnostic={version:'15-alpha1',camera:null,frames:0,processMs:0,maxProcessMs:0,events:[]};
+  function record(kind,data){diagnostic.events.push({kind,wallMs:performance.now(),videoTime:frameClock.latest?frameClock.latest.time:null,...data});if(diagnostic.events.length>250)diagnostic.events.shift();}
+  $('exportDiagnostics').onclick=()=>{
+    const copy={...diagnostic,frameClock:{...frameClock.stats},settings:{...S},tilt:upCam(),note:'Numeric diagnostics only; estimated shot values are not ground truth.'};
+    const url=URL.createObjectURL(new Blob([JSON.stringify(copy,null,2)],{type:'application/json'}));
+    const a=document.createElement('a');a.href=url;a.download='ouchi-diagnostics-'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  };
+  // Remove legacy image-derived thumbnails without reading or exporting their contents.
+  try{for(let i=localStorage.length-1;i>=0;i--){const k=localStorage.key(i);if(k&&k.startsWith('oa_tee_'))localStorage.removeItem(k);}}catch(e){}
+
 
   // ---- 傾きセンサー(重力の向き)----
   // 端末の座標 → 画面の座標 → カメラの座標(右+x・下+y・前+z)の「上向き」の単位ベクトル
@@ -1064,7 +1125,7 @@ const Cam = (() => {
 
   // ---- 状態の表示 ----
   const TEXT = {
-    off: ['カメラを開始してください', 'ボールの真後ろ1.8m・床に近い低い位置に、iPhoneを縦向きで置きます'],
+    off: ['カメラを開始してください', 'ボールの真後ろ・床に近い低い位置に縦向きで固定し、実際の距離を設定してください'],
     setup: ['ボールをタップ', 'ボールを置いて、映像の中のボールをタップすると、すぐ「打ってOK」になります'],
     remove: ['ボールをどけてください', '何もない置き場所を覚えます。ボールを手でどけて、少し待ってください(そのまま1球打ってもOK)'],
     moved: ['カメラが動いています', '三脚などに固定してください。止まると再開します'],
@@ -1127,8 +1188,7 @@ const Cam = (() => {
   function learnF(b) { if (!b || !b.r || !VW) return; const f = (2 * b.r) * S.dist / (S.diam / 1000) * 1080 / Math.min(VW, VH); if (f > 500 && f < 4000) { const old = store.get(fKey(), null); store.set(fKey(), old ? old * 0.7 + f * 0.3 : f); } }
   function newSession() {
     sess = DTL.session(() => ({ fpx: store.get(fKey(), null), dist: S.dist, diamMM: S.diam, massG: S.mass, cor: S.cor, attack: S.attack, drag: S.drag, sens: S.sens, up: upCam(), maxObs: 100, maxT: 1.6 }));
-    const t = store.get(teeKey(), null);
-    if (t && t.r > 2) { sess.useStored(t); setState('clear'); } else setState('setup');
+    setState('setup'); // Fresh registration; no persisted background images.
   }
 
   // 条件をゆるめながら順に試す(カメラによっては高い設定を受け付けない)
@@ -1138,6 +1198,8 @@ const Cam = (() => {
     throw last;
   }
   async function start() {
+    if(running||start.pending)return;start.pending=true;$('camStart').disabled=true;
+    try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('このブラウザではカメラを使えません(Safariで開いてください)'); return; }
     // 「カメラを開始」を押したときに、まず傾きセンサーの許可を聞き、そのあとカメラの許可を聞く(2つの確認が重ならないように)
     const motionOK0 = await askMotion();
@@ -1148,6 +1210,10 @@ const Cam = (() => {
         { audio: false, video: { facingMode: facing } }
       ]);
     } catch (e) { setState('error', `カメラを開けませんでした(${e && e.name || ''})。設定 → Safari → カメラ を確認してください`); return; }
+    frameClock=FrameClock.create();ftimes.length=0;
+    diagnostic.frames=0;diagnostic.processMs=0;diagnostic.maxProcessMs=0;diagnostic.events=[];
+    const cs=stream.getVideoTracks()[0].getSettings();diagnostic.camera={width:cs.width,height:cs.height,frameRate:cs.frameRate||null,facingMode:cs.facingMode||facing};
+    record('camera-start',{sensorAvailable:!!upCam()});
     vid.srcObject = stream;
     try { await vid.play(); } catch (e) {}
     await new Promise(r => { if (vid.videoWidth) r(); else vid.onloadedmetadata = () => r(); });
@@ -1157,15 +1223,18 @@ const Cam = (() => {
     try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) { wake = null; }
     running = true; lastTouch = lastActive = Date.now(); setButtons();
     newSession(); loop();
+    } finally {start.pending=false;$('camStart').disabled=false;}
   }
   function stop(msg) {
-    running = false;
+    running = false;generation++;
+    if(callbackId!==null){if(callbackKind==='video')vid.cancelVideoFrameCallback(callbackId);else cancelAnimationFrame(callbackId);callbackId=null;}
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     vid.srcObject = null;
     window.removeEventListener('devicemotion', onMotion); gAvg = null;
     try { if (wake) wake.release(); } catch (e) {} wake = null;
     $('stageEmpty').hidden = false; setButtons(); setDark(false);
     octx.clearRect(0, 0, ov.width, ov.height);
+    sess=null;lastRes=null;lastShot=null;scratch.width=scratch.height=1;tiny.width=tiny.height=1;
     setState('off', msg);
   }
   $('camStart').onclick = start;
@@ -1206,8 +1275,8 @@ const Cam = (() => {
     const rect = ov.getBoundingClientRect(), b = videoBox();
     const nx = ((e.clientX - rect.left) * devicePixelRatio - b.x) / b.w, ny = ((e.clientY - rect.top) * devicePixelRatio - b.y) / b.h;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    const ev = sess.tapReady(frameObj, nx * VW, ny * VH, performance.now() / 1000);
-    if (ev.ev === 'ready') { learnF(ev.ball); store.set(teeKey(), Object.assign({}, ev.tee)); issue = VW > VH ? 'landscape' : ev.issue || null; lastTouch = Date.now(); setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
+    const ev = sess.tapReady(frameObj, nx * VW, ny * VH, frameClock.latest ? frameClock.latest.time : 0);
+    if (ev.ev === 'ready') { learnF(ev.ball); record('tap',{ball:ev.ball}); issue = VW > VH ? 'landscape' : ev.issue || null; lastTouch = Date.now(); setState(issue === 'near' || issue === 'far' ? 'adjust' : 'ready'); }
     else toast('ボールが見つかりませんでした。ボールの真ん中をタップしてください');
   });
 
@@ -1215,18 +1284,19 @@ const Cam = (() => {
   const WHY = { none: '飛んでいくボールが見つかりませんでした', short: '追えたコマが少なすぎました', odd: '計測値が不自然でした' };
   function onResult(res) {
     lastRes = res; lastActive = Date.now();
+    const {obs,...summary}=res;record('result',{...summary,observationCount:obs?obs.length:0});
     if (!res.ok) { setState('error', `${WHY[res.why] || '計測できませんでした'}。部屋を明るくし、ボールの上側の背景がボールと違う色になるようにしてください`); cooldownUntil = performance.now() + 2000; return; }
     const cv = PHYS.plasticLaunch(res.speed, res.angle, { massG: S.mass, diamMM: S.diam, cor: S.cor, attack: S.attack });
     const speed = clamp(res.speed, 0.5, 40), angle = clamp(res.angle, 0, 80), spin = clamp(Math.round(cv.spin / 10) * 10, 0, 12000);
     const shot = { type: 'shot', id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), speed: +speed.toFixed(2), angle: +angle.toFixed(1), dir: +clamp(res.dir, -30, 30).toFixed(1), axis: +clamp(res.axis || 0, -35, 35).toFixed(1), spin,
-      club: +cv.clubSpeed.toFixed(2), loft: +cv.spinLoft.toFixed(1), massG: S.mass, diamMM: S.diam, drag: S.drag };
+      club: +cv.clubSpeed.toFixed(2), loft: +cv.spinLoft.toFixed(1), massG: S.mass, diamMM: S.diam, drag: S.drag, version:15, provenance:{launch:'estimated',spin:'estimated',axis:'assumed-zero',trajectory:'simulated'}, quality:{n:res.n,rms:res.rms,pitchMeasured:!!upCam()} };
     lastShot = shot; $('carryFix').hidden = false;
     $('cSpeed').textContent = speed.toFixed(1) + ' m/s'; $('cAngle').textContent = angle.toFixed(1) + '°';
     $('cDir').textContent = (shot.dir > 0.4 ? '右' : shot.dir < -0.4 ? '左' : '') + Math.abs(shot.dir).toFixed(1) + '°'; $('cSpin').textContent = spin + ' rpm';
     const f = ftimes.length > 10 ? Math.round((ftimes.length - 1) / (ftimes[ftimes.length - 1] - ftimes[0])) : 0;
-    $('cMeta').textContent = `クラブ速度 ${cv.clubSpeed.toFixed(1)} m/s(推定)、回転軸の傾き ${shot.axis}°、追跡 ${res.n} コマ・約${f}fps、当てはめの誤差 ${res.rms.toFixed(1)}px、空気抵抗の補正 ×${S.drag.toFixed(2)}`;
+    $('cMeta').textContent = `クラブ速度 ${cv.clubSpeed.toFixed(1)} m/s(推定)、回転軸は未測定（0°を仮定）、追跡 ${res.n} コマ・約${f}fps、当てはめ残差 ${res.rms.toFixed(1)}px（実精度ではありません）、空気抵抗の補正 ×${S.drag.toFixed(2)}`;
     $('camResult').hidden = false;
-    const ok = Net.send(shot);
+    const ok = Net.send(shot);record('send',{id:shot.id,sent:ok});
     setState('done', ok ? 'iPadを見てください' : 'iPadと未接続のため送れていません');
     cooldownUntil = performance.now() + 1500;
   }
@@ -1238,7 +1308,7 @@ const Cam = (() => {
     if (!sess) return;
     const b = videoBox(), sx = b.w / VW, sy = b.h / VH, dpr = devicePixelRatio;
     const X = (x) => b.x + x * sx, Y = (y) => b.y + y * sy;
-    const ring = (x, y, rad, color, width, dash) => { octx.save(); octx.strokeStyle = color; octx.lineWidth = width * dpr; octx.setLineDash(dash ? dash.map(v => v * dpr) : []); octx.beginPath(); octx.arc(X(x), Y(y), rad, 0, Math.PI * 2); octx.stroke(); octx.restore(); };
+    const ring = (x, y, rad, color, width, dash) => { if(![x,y,rad].every(Number.isFinite)||rad<=0)return;octx.save(); octx.strokeStyle = color; octx.lineWidth = width * dpr; octx.setLineDash(dash ? dash.map(v => v * dpr) : []); octx.beginPath(); octx.arc(X(x), Y(y), rad, 0, Math.PI * 2); octx.stroke(); octx.restore(); };
     const ss = sess.state, pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
     const tee = sess.tee, ball = sess.ball, cand = sess.cand;
     if (ss === 'track' || (performance.now() < cooldownUntil + 1500 && lastRes)) {
@@ -1276,14 +1346,14 @@ const Cam = (() => {
     if (state === 'done' || state === 'error') setState(sess.state === 'ready' ? 'ready' : 'wait');
     const ev = sess.feed(frameObj, t);
     if (ev) {
-      if (ev.ev === 'teeset' || ev.ev === 'empty') { const tt = Object.assign({}, sess.tee, { thumb: ev.thumb || (ev.tee && ev.tee.thumb) || sess.thumb }); store.set(teeKey(), tt); }
+      record(ev.ev,{state:sess.state,n:sess.obs.length}); // Never persist pixel-derived thumbnails.
       if (ev.ev === 'teeset') toast('置き場所を覚えました');
       if (ev.ev === 'ready') {
         learnF(ev.ball);
         issue = VW > VH ? 'landscape' : ev.issue || null;
         if (issue === 'near' || issue === 'far') setState('adjust'); else setState('ready', issue === 'landscape' ? '縦向きのほうが、上がっていくボールを長く追えます' : undefined);
       } else if (ev.ev === 'result') onResult(ev.res);
-      else if (ev.ev === 'calib') { const r = ev.res; if (r.dragFit && r.dragRms < 1.3 * r.rms + 0.5) { S.drag = +clamp(S.drag * 0.7 + r.dragFit * 0.3, 0.3, 2.5).toFixed(3); store.set('drag', S.drag); showDrag(); } lastRes = r; }
+      else if (ev.ev === 'calib') {const {obs,...summary}=ev.res;record('refinement',{...summary,applied:false});lastRes=ev.res;} // Automatic model learning disabled pending validation.
       else if (ev.ev === 'back') setState(ev.state === 'remove' ? 'remove' : 'wait');
       else if (ev.ev === 'retap') { store.set(teeKey(), null); setState('setup', 'カメラの向きが変わったので、置き場所を登録し直します。映像のボールをタップしてください'); }
       else if (EVS[ev.ev] && state !== EVS[ev.ev]) setState(EVS[ev.ev]);
@@ -1294,17 +1364,20 @@ const Cam = (() => {
   // 1コマの処理でエラーが出ても止まらないようにし、内容を画面に出す(原因を調べるため)
   let errShown = 0;
   function safeFrame(t) {
+    const started=performance.now();
     try { frame(t); }
-    catch (e) { if (Date.now() - errShown > 3000) { errShown = Date.now(); $('stateSub').textContent = 'エラー:' + String(e && e.message || e).slice(0, 120); } }
+    catch (e) { record('error',{message:String(e.message||e).slice(0,120)});if (Date.now() - errShown > 3000) { errShown = Date.now(); $('stateSub').textContent = 'エラー:' + String(e && e.message || e).slice(0, 120); } }
+    const elapsed=performance.now()-started;diagnostic.frames++;diagnostic.processMs+=elapsed;diagnostic.maxProcessMs=Math.max(diagnostic.maxProcessMs,elapsed);
   }
   function loop() {
     if (!running) return;
+    const active=++generation;
     if ('requestVideoFrameCallback' in vid) {
-      const cb = (now, meta) => { if (!running) return; const ms = meta && (meta.captureTime || meta.presentationTime || now); safeFrame(ms / 1000); vid.requestVideoFrameCallback(cb); };
-      vid.requestVideoFrameCallback(cb);
+      callbackKind='video';const cb=(now,meta)=>{if(!running||active!==generation)return;const f=frameClock.next(now,meta,vid.currentTime);if(f)safeFrame(f.time);callbackId=vid.requestVideoFrameCallback(cb);};
+      callbackId=vid.requestVideoFrameCallback(cb);
     } else {
-      const cb = (now) => { if (!running) return; safeFrame(now / 1000); requestAnimationFrame(cb); };
-      requestAnimationFrame(cb);
+      callbackKind='raf';const cb=(now)=>{if(!running||active!==generation)return;const f=frameClock.next(now,null,vid.currentTime);if(f)safeFrame(f.time);callbackId=requestAnimationFrame(cb);};
+      callbackId=requestAnimationFrame(cb);
     }
   }
   setButtons();
@@ -1644,7 +1717,7 @@ const App = (() => {
   function simulate(s) {
     if (s.massG) { ballSet = { massG: s.massG, diamMM: s.diamMM, drag: s.drag }; store.set('ballSet', ballSet); }
     // ラフから打つと、フェースとボールの間に芝が挟まってスピンが減る
-    const sh = Object.assign({}, s, { spin: lie === 'ラフ' ? s.spin * 0.5 : s.spin });
+    const sh = Object.assign({}, s); // Keep the same spin model on both devices.
     const res = SIM.simulate(sh, COURSE, COURSE.tee, 0, PHYS.plasticProfile({ massG: ballSet.massG, diamMM: ballSet.diamMM, dragScale: ballSet.drag }));
     let apex = 0, carryT = res.duration; for (const p of res.pts) if (p[2] > apex) apex = p[2];
     for (let i = 1; i < res.pts.length; i++) if (res.pts[i][2] <= 0.001 && res.pts[i - 1][2] > 0.001) { carryT = res.pts[i][0]; res.carryPt = { x: res.pts[i][1], z: res.pts[i][3] }; break; }
@@ -1703,7 +1776,7 @@ const App = (() => {
     }
   }
   const READY_TEXT = { off: 'iPhoneのカメラ待ち', wait: 'ボールを置いてください', ready: '打ってOK', track: '計測中…' };
-  const ADJUST_TEXT = { portrait: 'iPhoneを横向きにしてください', near: 'カメラが近すぎます。1m前後離してください', far: 'カメラが遠すぎます。少し近づけてください' };
+  const ADJUST_TEXT = { portrait: 'iPhoneを縦向きにしてください', near: 'カメラが近すぎます。距離設定と置き方を確認してください', far: 'カメラが遠すぎます。少し近づけてください' };
   function setReady(s, iss) {
     const was = readyState; readyState = s;
     $('readyMark').dataset.state = s; $('world').dataset.ready = s;

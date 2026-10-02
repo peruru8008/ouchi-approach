@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>おうちアプローチ</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css?v=14">
+<link rel="stylesheet" href="style.css?v=15a1">
 </head>
 <body>
 
@@ -30,7 +30,7 @@
     <b>iPhone:カメラ</b>
     <span>iPadのQRコードを読み取ると、自動でこちらになります。</span>
   </button>
-  <p class="note">カメラの映像はiPhoneの中だけで処理します。iPadへ送るのは計測した数値だけで、映像は保存も送信もしません。</p>
+  <p class="note">カメラの映像はiPhoneの中だけで処理します。iPadへ送るのはショットの推定値や状態だけで、映像は保存も送信もしません。</p>
 </main>
 
 <!-- ============ CAMERA (iPhone) ============ -->
@@ -49,7 +49,7 @@
 
   <section class="statuscard" id="camStatus" data-state="off">
     <b id="stateText">カメラを開始してください</b>
-    <span id="stateSub">ボールの真後ろ1.8m・床に近い低い位置に、iPhoneを縦向きで置きます</span>
+    <span id="stateSub">ボールの真後ろ・床に近い低い位置に縦向きで固定し、実際の距離を設定してください</span>
   </section>
 
   <div class="stage" id="stage">
@@ -62,28 +62,30 @@
     <button class="btn" id="camStop" hidden>カメラを止める</button>
     <button class="btn" id="camFlip">インカメラに切り替え</button>
   </div>
-  <p class="note">最初の1回だけ、置いたボールを映像の上でタップして置き場所を登録します。カメラの傾きは「カメラを開始」のときに許可を求められる傾きセンサーで測ります。しばらく触らないと画面を暗くします(タップで戻ります)。<span class="ver">版 v14</span></p>
+  <p class="note">カメラを開始するたびに、置いたボールを映像の上でタップして置き場所を登録します。カメラの傾きは「カメラを開始」のときに許可を求められる傾きセンサーで測ります。しばらく触らないと画面を暗くします(タップで戻ります)。<span class="ver">版 v15α1・検証用</span></p>
 
   <section class="card" id="camResult" hidden>
     <div class="readout four">
-      <div><span>球速</span><b id="cSpeed">–</b></div>
-      <div><span>打ち出し角</span><b id="cAngle">–</b></div>
-      <div><span>左右</span><b id="cDir">–</b></div>
+      <div><span>球速（推定）</span><b id="cSpeed">–</b></div>
+      <div><span>打ち出し角（推定）</span><b id="cAngle">–</b></div>
+      <div><span>左右（推定）</span><b id="cDir">–</b></div>
       <div><span>スピン(推定)</span><b id="cSpin">–</b></div>
     </div>
     <p class="note mt" id="cMeta"></p>
     <div class="corhelp mt" id="carryFix" hidden>
       <label for="carryCm">(手動で合わせたいとき)今の1球で、最初に床に落ちた所までの距離</label>
       <div class="row"><input id="carryCm" type="number" inputmode="decimal" min="20" max="3000" step="1" placeholder="例:450" aria-label="最初に落ちた距離(cm)"><span class="unit">cm</span><button class="btn" id="carryApply">飛び方を合わせる</button></div>
-      <p class="note">ふだんは自動で合わせます。ボールが着地まで写っていると、打つたびに空気抵抗の補正を少しずつ合わせ込みます。</p>
+      <p class="note">自動学習は検証が終わるまで停止しています。試験中は補正値を変えずに比較してください。</p>
     </div>
   </section>
 
   <details class="card">
     <summary>計測の設定</summary>
+    <p class="note">検証用です。開始ごとに距離設定とボール位置を確認してください。通常時の映像・画像は保存しません。</p>
+    <button class="btn" id="exportDiagnostics">診断記録を保存（数値のみ）</button>
     <div class="stack mt">
       <p class="kv">カメラの傾き <b id="tiltOut">–</b></p>
-      <p class="kv">空気抵抗の補正(自動) <b id="oDrag">×1.00</b> <button class="linkbtn" id="dragReset">元に戻す</button></p>
+      <p class="kv">空気抵抗の補正（手動） <b id="oDrag">×1.00</b> <button class="linkbtn" id="dragReset">元に戻す</button></p>
       <button class="btn" id="reTee">置き場所を登録し直す</button>
       <div class="field"><label for="sDist">カメラからボールまでの距離</label><output id="oDist"></output><input id="sDist" type="range" min="1" max="3.5" step="0.01" value="1.8"></div>
       <div class="field"><label for="sDiam">ボールの直径</label><output id="oDiam"></output><input id="sDiam" type="range" min="30" max="80" step="0.5" value="42"></div>
@@ -96,7 +98,7 @@
       </div>
       <div class="field"><label for="sAttack">入射角(クラブが下りながら当たる角度)</label><output id="oAttack"></output><input id="sAttack" type="range" min="-8" max="2" step="0.5" value="-3"></div>
       <div class="field"><label for="sSens">検出の感度</label><output id="oSens"></output><input id="sSens" type="range" min="0.5" max="2" step="0.05" value="1"></div>
-      <p class="note">ボールの境目(2色の境)は、飛ばす方向に向けて縦にまっすぐ置きます。飛んでいる間の境目の傾きから、回転軸の傾き(曲がり)を読みます。</p>
+      <p class="note">ボールの境目(2色の境)は、飛ばす方向に向けて縦にまっすぐ置きます。回転軸はまだ測定できません。弾道表示は回転軸0°を仮定しています。</p>
     </div>
   </details>
 </main>
@@ -118,11 +120,11 @@
       </div>
       <div class="ready" id="readyMark" data-state="off"><i aria-hidden="true"></i><span id="readyText">iPhoneのカメラ待ち</span></div>
       <div class="board six">
-        <div><span>左右</span><b id="gDir">–</b><em>度</em></div>
-        <div><span>球速</span><b id="gSpeed">–</b><em>m/s</em></div>
-        <div><span>打ち出し角</span><b id="gAngle">–</b><em>度</em></div>
-        <div><span>キャリー</span><b id="gCarry">–</b><em>m</em></div>
-        <div><span>総距離</span><b id="gTotal">–</b><em>m</em></div>
+        <div><span>左右（推定）</span><b id="gDir">–</b><em>度</em></div>
+        <div><span>球速（推定）</span><b id="gSpeed">–</b><em>m/s</em></div>
+        <div><span>打ち出し角（推定）</span><b id="gAngle">–</b><em>度</em></div>
+        <div><span>キャリー（計算）</span><b id="gCarry">–</b><em>m</em></div>
+        <div><span>総距離（計算）</span><b id="gTotal">–</b><em>m</em></div>
         <div class="hi"><span>カップまで</span><b id="gPin">–</b><em id="gPinU"></em></div>
       </div>
     </div>
@@ -164,9 +166,9 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="vendor/three.min.js?v=14"></script>
-<script src="vendor/peerjs.min.js?v=14"></script>
-<script src="vendor/qrcode.js?v=14"></script>
-<script src="app.js?v=14"></script>
+<script src="vendor/three.min.js?v=15a1"></script>
+<script src="vendor/peerjs.min.js?v=15a1"></script>
+<script src="vendor/qrcode.js?v=15a1"></script>
+<script src="app.js?v=15a1"></script>
 </body>
 </html>
